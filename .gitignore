@@ -1,20 +1,5 @@
 # Local editor state
-.vs/
-.vscode/
-.idea/
+.vscode
 
 # Build output
-/build/
-/out/
-/Compiler/build/
-/Compiler/out/
-*.obj
-*.o
-*.exe
-*.pdb
-*.ilk
-
-# Local secrets
-.env
-.env.*
-!.env.example
+build/
