@@ -1,0 +1,10 @@
+fn main() -> i32 {
+    x: i32 = 1;
+    write(&x);
+    return x;
+}
+
+fn write(p: *i32) -> i32 {
+    *p = 7;
+    return 0;
+}

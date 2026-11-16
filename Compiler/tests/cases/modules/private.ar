@@ -1,0 +1,2 @@
+s :: import "state";
+fn main() -> i32 { return s::helper(); }

@@ -1,0 +1,1 @@
+m :: import "model";fn main()->i32{a:m::Hidden;return 0;}

@@ -1,0 +1,4 @@
+fn main() -> i32 {
+    unused: i32 = 1 + 2;
+    return 7;
+}

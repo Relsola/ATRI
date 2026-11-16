@@ -1,0 +1,32 @@
+base: i32 := 3;
+fn default_a() -> i32 { return base; }
+struct Pair { a: i32 = default_a(); b: i32 = 2; }
+struct Outer { inner: Pair; flag: bool; }
+struct Node { n: i32; next: *Node; }
+struct Empty {}
+fn empty(value: Empty) -> Empty { return value; }
+fn make(a: i32) -> Pair { return {.a = a}; }
+fn snapshot(value: Pair, ignored: i32) -> i32 { return value.a; }
+fn mutate(value: *Pair) -> i32 { (*value).a = 99; return 0; }
+fn main() -> i32 {
+    zero: Pair = {.a = 0};
+    if (zero.a != 0 || zero.b != 2) { return 1; }
+    original: Outer;
+    if (original.inner.a != 3 || original.inner.b != 2 || original.flag) { return 2; }
+    copy: Outer = original;
+    copy.inner.a = 7;
+    pointer: *i32 = &copy.inner.b;
+    *pointer = 14;
+    copy.flag = true;
+    if (copy.inner.a != 7 || copy.inner.b != 14 || !copy.flag || original.inner.a != 3 || original.inner.b != 2) { return 3; }
+    value: Pair = make(7);
+    if (snapshot(value, mutate(&value)) != 7 || value.a != 99 || make(4).b != 2) { return 4; }
+    first: Node = {.n = 10};
+    second: Node = {.n = 2, .next = &first};
+    duplicate: Node = second;
+    (*duplicate.next).n = 13;
+    duplicate.n = 8;
+    if (first.n != 13 || second.n != 2 || duplicate.n != 8) { return 5; }
+    e: Empty = empty({});
+    return 0;
+}

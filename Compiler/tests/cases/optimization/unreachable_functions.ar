@@ -1,0 +1,32 @@
+[[extern(C)]]
+fn missing_dead_dependency() -> i32;
+
+fn dead_entry() -> i32 {
+    return dead_peer();
+}
+
+fn dead_peer() -> i32 {
+    return dead_entry() + missing_dead_dependency();
+}
+
+fn main() -> i32 {
+    return start(4);
+}
+
+fn start(n: i32) -> i32 {
+    return even(n);
+}
+
+fn even(n: i32) -> i32 {
+    if (n == 0) {
+        return 7;
+    }
+    return odd(n - 1);
+}
+
+fn odd(n: i32) -> i32 {
+    if (n == 0) {
+        return 7;
+    }
+    return even(n - 1);
+}

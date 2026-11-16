@@ -1,37 +1,41 @@
-#include <stdint.h>
-#include <stdio.h>
+#include "native_expect.h"
+#include "pointer_harness_bindings.h"
 
-extern int32_t atri_fn_0(int32_t *, int32_t);
-extern int32_t atri_fn_1(int32_t *, int32_t *);
-extern int32_t *atri_fn_2(int32_t *);
-extern int32_t atri_fn_3(int32_t);
-extern int32_t atri_fn_4(int32_t, int32_t *, int32_t, int32_t *, int32_t *, int32_t);
-extern int32_t atri_fn_5(int32_t *);
-extern int32_t *atri_fn_6(int32_t *);
-extern int32_t atri_fn_7(int32_t *);
-extern int32_t *atri_fn_8(void);
-extern int32_t *atri_fn_9(int32_t *);
-extern int32_t atri_fn_10(int32_t *);
-extern int32_t atri_fn_11(int32_t *, int32_t *);
-#define EXPECT(c) do { if (!(c)) { fputs(#c " failed\n", stderr); return 1; } } while (0)
 int main(void) {
     int32_t x = 1, y = 2, z = 3;
-    EXPECT(atri_fn_0(&x, 42) == 42 && x == 42);
-    EXPECT(atri_fn_1(&x, &x) == 7 && x == 7);
-    EXPECT(atri_fn_1(&x, &y) == 5 && x == 5 && y == 4);
-    EXPECT(atri_fn_2(&x) == &x);
-    EXPECT(atri_fn_3(7) == 10);
-    EXPECT(atri_fn_3(INT32_MAX) == INT32_MIN + 2);
-    EXPECT(atri_fn_4(10, &x, 20, &y, &z, 30) == 60);
-    EXPECT(x == 10 && y == 20 && z == 30);
+
+    EXPECT_EQ(42, atri_test_write(&x, 42));
+    EXPECT_EQ(42, x);
+    EXPECT_EQ(7, atri_test_aliases(&x, &x));
+    EXPECT_EQ(7, x);
+    EXPECT_EQ(5, atri_test_aliases(&x, &y));
+    EXPECT_EQ(5, x);
+    EXPECT_EQ(4, y);
+
+    EXPECT_PTR_EQ(&x, atri_test_identity(&x));
+    EXPECT_EQ(10, atri_test_local_roundtrip(7));
+    EXPECT_EQ(INT32_MIN + 2, atri_test_local_roundtrip(INT32_MAX));
+    EXPECT_EQ(60, atri_test_mixed(10, &x, 20, &y, &z, 30));
+    EXPECT_EQ(10, x);
+    EXPECT_EQ(20, y);
+    EXPECT_EQ(30, z);
+
     x = 1;
-    EXPECT(atri_fn_5(&x) == 10 && x == 5);
-    EXPECT(atri_fn_6(&x) == &x);
-    EXPECT(atri_fn_7(&x) == 17 && x == 17);
-    EXPECT(atri_fn_8() == NULL);
-    EXPECT(atri_fn_9(&x) == &x && atri_fn_9(NULL) == NULL);
-    EXPECT(atri_fn_10(&x) == 0 && x == 23);
-    x = 5; y = 6;
-    EXPECT(atri_fn_11(&x, &y) == 5 && y == 11);
+    EXPECT_EQ(10, atri_test_through_call(&x));
+    EXPECT_EQ(5, x);
+    EXPECT_PTR_EQ(&x, atri_test_return_alias(&x));
+    EXPECT_EQ(17, atri_test_returned_pointer_write(&x));
+    EXPECT_EQ(17, x);
+
+    EXPECT_PTR_EQ(NULL, atri_test_null_pointer());
+    EXPECT_PTR_EQ(&x, atri_test_address_of_dereference(&x));
+    EXPECT_PTR_EQ(NULL, atri_test_address_of_dereference(NULL));
+    EXPECT_EQ(0, atri_test_unused_call_result(&x));
+    EXPECT_EQ(23, x);
+
+    x = 5;
+    y = 6;
+    EXPECT_EQ(5, atri_test_reassign_pointer(&x, &y));
+    EXPECT_EQ(11, y);
     return 0;
 }

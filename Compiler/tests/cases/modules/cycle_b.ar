@@ -1,0 +1,2 @@
+a :: import "cycle_a";
+export fn b(n: i32) -> i32 { if (n == 0) { return 7; } return a::a(n - 1); }

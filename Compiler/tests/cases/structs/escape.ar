@@ -1,0 +1,1 @@
+struct A{x:i32;}fn f()->*i32{a:A;return &a.x;}fn main()->i32{return 0;}

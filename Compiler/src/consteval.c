@@ -10,9 +10,10 @@ typedef struct {
     Evaluation *evaluation;
     AtriIRFunction *function;
     const uint64_t *parameters;
+    /* values 缓存本次指令执行的结果；locals 保存可被 store 修改的对象内容，两者不能共用。 */
     uint64_t *values;
     uint64_t *locals;
-    unsigned char *states;
+    unsigned char *states; /* 0 未求值，1 正在求值，2 已缓存；状态 1 再次被依赖表示循环。 */
 } Frame;
 
 static bool error(Evaluation *e, AtriSpan span, const char *message) {
@@ -43,6 +44,7 @@ static bool constant(Evaluation *e, AtriIRFunction *f, AtriIRConstant *c, uint64
     if (c->state == 1) return error(e, c->span, "cyclic compile-time constant dependency");
     c->state = 1;
     Frame frame;
+    /* 声明常量独立求值，不继承当前调用的运行期参数；函数调用内部的已知实参仍可正常使用。 */
     if (!create_frame(e, f, NULL, &frame)) return false;
     bool ok = value(&frame, c->expression, &c->bits);
     destroy_frame(&frame);
@@ -50,7 +52,7 @@ static bool constant(Evaluation *e, AtriIRFunction *f, AtriIRConstant *c, uint64
     return ok;
 }
 
-/* Interpret control flow and local storage without executing untaken branches. */
+/* 按程序计数器执行实际路径，包括结果未使用的调用；仅递归求最终返回值会漏掉副作用或不终止行为。 */
 static bool execute(Evaluation *e, AtriId callee, const uint64_t *arguments, uint64_t *out) {
     AtriIRFunction *f = &e->program->functions[callee];
     Frame frame;
@@ -62,6 +64,7 @@ static bool execute(Evaluation *e, AtriId callee, const uint64_t *arguments, uin
         if (f->instructions[i].kind == ATRI_IR_LABEL) labels[f->instructions[i].immediate] = i;
     bool ok = false;
     for (size_t i = 0; i < f->instruction_count;) {
+        /* := 初始化是独立义务，不属于每次调用的运行期语句；跳到结果占位后按需取得常量。 */
         for (size_t c = 0; c < f->constant_count; ++c)
             if (f->constants[c].first_instruction == i && i < f->constants[c].result) {
                 i = f->constants[c].result; break;
@@ -77,19 +80,19 @@ static bool execute(Evaluation *e, AtriId callee, const uint64_t *arguments, uin
         }
         if (inst->kind == ATRI_IR_UNREACHABLE) { error(e, inst->span, "compile-time function reached its end without returning"); break; }
         if (inst->kind == ATRI_IR_NOP || inst->kind == ATRI_IR_LABEL) { ++i; continue; }
-        if (inst->kind == ATRI_IR_LOCAL) {
-            if (inst->type == ATRI_IR_PTR_I32) { error(e, inst->span, "compile-time pointer operations are not supported yet"); break; }
+        if (inst->kind == ATRI_IR_LOCAL && inst->immediate == 0) {
+            if (atri_ir_is_pointer(inst->type)) { error(e, inst->span, "compile-time pointer operations are not supported yet"); break; }
             frame.locals[i] = 0; ++i; continue;
         }
         if (inst->kind == ATRI_IR_STORE) {
             uint64_t stored;
-            if (f->instructions[inst->left].kind != ATRI_IR_LOCAL) {
+            if (f->instructions[inst->left].kind != ATRI_IR_LOCAL || f->instructions[inst->left].immediate != 0) {
                 error(e, inst->span, "compile-time pointer operations are not supported yet"); break;
             }
             if (!value(&frame, inst->right, &stored)) break;
             frame.locals[inst->left] = stored; ++i; continue;
         }
-        /* A loop re-executes definitions: cached operands belong to this iteration. */
+        /* 同一指令可被循环再次执行，必须刷新它的结果；已执行的操作数缓存则代表当前迭代的值。 */
         frame.states[i] = 0;
         uint64_t ignored;
         if (!value(&frame, i, &ignored)) break;
@@ -102,9 +105,10 @@ static bool value(Frame *frame, AtriId id, uint64_t *out) {
     Evaluation *e = frame->evaluation;
     AtriIRFunction *f = frame->function;
     const AtriIRInst *inst = &f->instructions[id];
+    if (atri_ir_is_struct(inst->type) || inst->kind == ATRI_IR_FIELD) { return error(e, inst->span, "compile-time struct values are not supported yet"); }
     if ((!atri_ir_is_integer(inst->type) && inst->type != ATRI_IR_BOOL) || inst->kind == ATRI_IR_LOCAL ||
         inst->kind == ATRI_IR_STORE || inst->kind == ATRI_IR_PTR_DIFF || inst->kind == ATRI_IR_ADDRESS ||
-        (inst->kind == ATRI_IR_LOAD && f->instructions[inst->left].kind != ATRI_IR_LOCAL))
+        (inst->kind == ATRI_IR_LOAD && (f->instructions[inst->left].kind != ATRI_IR_LOCAL || f->instructions[inst->left].immediate != 0)))
         return error(e, inst->span, "compile-time pointer operations are not supported yet");
     if (!step(e, inst->span)) return false;
     if (++e->depth > 256) {
@@ -152,6 +156,9 @@ static bool value(Frame *frame, AtriId id, uint64_t *out) {
             break;
         }
         case ATRI_IR_CALL: {
+            if (e->program->functions[inst->callee].external_c) {
+                error(e, inst->span, "extern(C) calls cannot execute at compile time"); break;
+            }
             uint64_t *args = inst->argument_count == 0 ? NULL : malloc(inst->argument_count * sizeof(*args));
             if (inst->argument_count != 0 && args == NULL) { error(e, inst->span, "out of memory during compile-time call"); break; }
             ok = true;
@@ -169,8 +176,9 @@ done:
 }
 
 bool atri_resolve_constants(AtriIRProgram *p, AtriDiagnostic *d) {
+    /* 预算由整次求值共享，避免嵌套调用每次重新获得额度而绕过限制。 */
     Evaluation e = {.program = p, .diagnostic = d, .remaining_steps = 100000};
-    /* Resolve every declaration, including declarations after return, before mutating IR. */
+    /* 先求完所有声明，再改写 IR；包括 return 后的声明，也避免依赖求值读到已被删除的初始化。 */
     for (size_t n = 0; n < p->function_count; ++n) {
         AtriIRFunction *f = &p->functions[n];
         for (size_t c = 0; c < f->constant_count; ++c) {

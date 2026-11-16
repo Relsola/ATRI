@@ -6,6 +6,10 @@ static bool is_digit(unsigned char c) {
     return c >= '0' && c <= '9';
 }
 
+static bool is_hex_digit(unsigned char c) {
+    return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
 static bool is_identifier_start(unsigned char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
@@ -42,11 +46,11 @@ static AtriToken error_token(AtriLexer *lexer, size_t start,
 AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
     const char *text = lexer->source.text;
     size_t length = lexer->source.length;
-    while (lexer->offset < length &&
-           is_space((unsigned char)text[lexer->offset])) {
-        ++lexer->offset;
+    for (;;) {
+        while (lexer->offset < length && is_space((unsigned char)text[lexer->offset])) { ++lexer->offset; }
+        if (lexer->offset + 1 >= length || text[lexer->offset] != '/' || text[lexer->offset+1] != '/') { break; }
+        while (lexer->offset < length && text[lexer->offset] != '\n' && text[lexer->offset] != '\r') { ++lexer->offset; }
     }
-
     size_t start = lexer->offset;
     if (start == length) {
         return token(ATRI_TOKEN_EOF, start, start);
@@ -61,7 +65,7 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
         size_t count = lexer->offset - start;
         AtriTokenKind kind = ATRI_TOKEN_IDENTIFIER;
         static const struct { const char *name; AtriTokenKind kind; } keywords[] = {
-            {"fn", ATRI_TOKEN_FN}, {"return", ATRI_TOKEN_RETURN}, {"null", ATRI_TOKEN_NULL},
+            {"struct", ATRI_TOKEN_STRUCT}, {"import", ATRI_TOKEN_IMPORT}, {"export", ATRI_TOKEN_EXPORT}, {"fn", ATRI_TOKEN_FN}, {"return", ATRI_TOKEN_RETURN}, {"null", ATRI_TOKEN_NULL},
             {"true", ATRI_TOKEN_TRUE}, {"false", ATRI_TOKEN_FALSE},
             {"if", ATRI_TOKEN_IF}, {"else", ATRI_TOKEN_ELSE}, {"while", ATRI_TOKEN_WHILE},
             {"do", ATRI_TOKEN_DO}, {"for", ATRI_TOKEN_FOR}, {"loop", ATRI_TOKEN_LOOP},
@@ -79,6 +83,11 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
                is_digit((unsigned char)text[lexer->offset])) {
             ++lexer->offset;
         }
+        if (lexer->offset + 1 < length && text[lexer->offset] == '.' && is_digit((unsigned char)text[lexer->offset+1])) {
+            ++lexer->offset;
+            while (lexer->offset < length && is_digit((unsigned char)text[lexer->offset])) { ++lexer->offset; }
+            return error_token(lexer, start, diagnostic, "floating-point literals are not supported yet");
+        }
         if (lexer->offset < length &&
             is_identifier_start((unsigned char)text[lexer->offset])) {
             while (lexer->offset < length &&
@@ -93,17 +102,64 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
     }
 
     switch (c) {
+        case '"':
+            while (lexer->offset < length) {
+                unsigned char byte = (unsigned char)text[lexer->offset++];
+                if (byte == '"') {
+                    return token(ATRI_TOKEN_STRING, start, lexer->offset);
+                }
+                if (byte == 0) {
+                    return error_token(lexer, start, diagnostic, "NUL byte is not allowed in source text");
+                }
+                if (byte == '\r' || byte == '\n') {
+                    return error_token(lexer, start, diagnostic, "newline is not allowed in a string literal; use \\n");
+                }
+                if (byte != '\\') {
+                    continue;
+                }
+                if (lexer->offset == length) {
+                    break;
+                }
+                byte = (unsigned char)text[lexer->offset++];
+                if (byte == 0) {
+                    return error_token(lexer, start, diagnostic, "NUL byte is not allowed in source text");
+                }
+                if (byte == 'x') {
+                    if (length - lexer->offset < 2 || !is_hex_digit((unsigned char)text[lexer->offset]) ||
+                        !is_hex_digit((unsigned char)text[lexer->offset+1])) {
+                        return error_token(lexer, start, diagnostic, "string escape \\x requires exactly two hexadecimal digits");
+                    }
+                    lexer->offset += 2;
+                } else if (strchr("0nrtabfv\\\"'", byte) == NULL) {
+                    return error_token(lexer, start, diagnostic, "unsupported string escape");
+                }
+            }
+            return error_token(lexer, start, diagnostic, "unterminated string literal");
+        case '[':
+            if (lexer->offset < length && text[lexer->offset] == '[') {
+                ++lexer->offset; return token(ATRI_TOKEN_ATTRIBUTE_OPEN, start, lexer->offset);
+            }
+            break;
+        case ']':
+            if (lexer->offset < length && text[lexer->offset] == ']') {
+                ++lexer->offset; return token(ATRI_TOKEN_ATTRIBUTE_CLOSE, start, lexer->offset);
+            }
+            break;
         case '(': return token(ATRI_TOKEN_LEFT_PAREN, start, lexer->offset);
         case ')': return token(ATRI_TOKEN_RIGHT_PAREN, start, lexer->offset);
         case '{': return token(ATRI_TOKEN_LEFT_BRACE, start, lexer->offset);
         case '}': return token(ATRI_TOKEN_RIGHT_BRACE, start, lexer->offset);
         case ';': return token(ATRI_TOKEN_SEMICOLON, start, lexer->offset);
         case ':':
+            if (lexer->offset < length && text[lexer->offset] == ':') {
+                ++lexer->offset; return token(ATRI_TOKEN_SCOPE, start, lexer->offset);
+            }
             if (lexer->offset < length && text[lexer->offset] == '=') {
                 ++lexer->offset;
                 return token(ATRI_TOKEN_CONSTANT_INIT, start, lexer->offset);
             }
             return token(ATRI_TOKEN_COLON, start, lexer->offset);
+        case '.': return token(ATRI_TOKEN_DOT, start, lexer->offset);
         case ',': return token(ATRI_TOKEN_COMMA, start, lexer->offset);
         case '=':
             if (lexer->offset < length && text[lexer->offset] == '=') {

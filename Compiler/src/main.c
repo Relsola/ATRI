@@ -49,7 +49,17 @@ static void usage(FILE *stream, const char *name) {
     fprintf(stream, "Usage: %s [--emit-ast|--emit-ir|--emit-ir-before-opt|-S] [-O0|-O1] [-o output] <source-file|->\n", name);
     fputs("-O1 (default): fold constants and inline small nonrecursive leaf functions.\n"
           "-O0: fold local constants, preserve function calls.\n"
-          "Assembly targets Windows x64 with clang's integrated assembler.\n", stream);
+          "Output is text only (AST, IR, or Windows x64 assembly); -o chooses the filename.\n"
+          "For an executable, emit assembly with -S -o program.s, then run:\n"
+          "  clang program.s -o program.exe\n", stream);
+}
+
+static bool executable_output(const char *path) {
+    const char *suffix = strrchr(path, '.');
+    return suffix != NULL && strlen(suffix) == 4 &&
+        (suffix[1] == 'e' || suffix[1] == 'E') &&
+        (suffix[2] == 'x' || suffix[2] == 'X') &&
+        (suffix[3] == 'e' || suffix[3] == 'E');
 }
 
 int main(int argc, char **argv) {
@@ -75,6 +85,11 @@ int main(int argc, char **argv) {
     }
     if (input == NULL || (output != NULL && strcmp(input, output) == 0)) {
         usage(stderr, argv[0]); return 2;
+    }
+    if (output != NULL && executable_output(output)) {
+        fprintf(stderr, "%s: error: this tool emits text, not an executable; '.exe' output is not supported\n"
+            "Emit assembly with -S -o program.s, then run: clang program.s -o program.exe\n", output);
+        return 2;
     }
     bool from_stdin = strcmp(input, "-") == 0;
 #ifdef _WIN32
@@ -103,17 +118,19 @@ int main(int argc, char **argv) {
         .text = text,
         .length = length
     };
-    AtriProgram program;
+    AtriProgram program = {0};
     AtriDiagnostic diagnostic;
-    if (!atri_parse(source, &program, &diagnostic)) {
-        atri_print_diagnostic(stderr, source, diagnostic);
-        free(text);
-        return 1;
+    AtriSource loaded = source;
+    bool parsed = atri_load_program(source, &loaded, &program, &diagnostic);
+    if (loaded.text != source.text) { free(text); text = (char *)loaded.text; source = loaded; }
+    if (!parsed) {
+        atri_program_diagnostic(stderr, source, &program, diagnostic);
+        atri_program_destroy(&program); free(text); return 1;
     }
     AtriIRProgram ir = {0};
     if (mode != EMIT_AST && (!atri_lower(source, &program, &ir, &diagnostic) ||
         (mode != EMIT_RAW_IR && !atri_optimize(&ir, inline_functions, &diagnostic)))) {
-        atri_print_diagnostic(stderr, source, diagnostic);
+        atri_program_diagnostic(stderr, source, &program, diagnostic);
         atri_ir_destroy(&ir); atri_program_destroy(&program); free(text); return 1;
     }
     FILE *destination = output == NULL ? stdout : fopen(output, "wb");
@@ -127,7 +144,7 @@ int main(int argc, char **argv) {
     else success = atri_emit_x64(destination, source, &ir, &diagnostic);
     bool io_error = fflush(destination) == EOF || ferror(destination);
     if (output != NULL && fclose(destination) == EOF) io_error = true;
-    if (!success) atri_print_diagnostic(stderr, source, diagnostic);
+    if (!success) atri_program_diagnostic(stderr, source, &program, diagnostic);
     if (io_error) fprintf(stderr, "%s: error: cannot write output\n", output == NULL ? "<stdout>" : output);
     atri_ir_destroy(&ir);
     atri_program_destroy(&program);

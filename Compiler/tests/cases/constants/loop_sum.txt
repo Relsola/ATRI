@@ -1,0 +1,15 @@
+fn f() -> i32 {
+    result: i32 := sum(5);
+    return result;
+}
+
+fn sum(n: i32) -> i32 {
+    total: i32;
+    for (i: i32; i < n; i = i + 1) {
+        if (i == 2) {
+            continue;
+        }
+        total = total + i;
+    }
+    return total;
+}

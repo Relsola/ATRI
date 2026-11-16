@@ -1,0 +1,7 @@
+fn main() -> i32 {
+    return a();
+}
+
+fn a() -> i32 { return b(); }
+fn b() -> i32 { return c(); }
+fn c() -> i32 { return 3; }

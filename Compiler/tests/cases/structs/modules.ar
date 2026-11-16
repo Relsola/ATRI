@@ -1,0 +1,10 @@
+import "model";
+m :: import "./model";
+fn seed() -> i32 { return 99; }
+fn main() -> i32 {
+    a: m::Vec = {};
+    b: Vec = m::pass(a);
+    b.a = 5;
+    if (a.a != 4 || b.a != 5 || b.b != 0) { return 1; }
+    return 0;
+}

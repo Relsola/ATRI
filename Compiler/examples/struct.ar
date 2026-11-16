@@ -1,0 +1,31 @@
+struct Ts {
+    a: i32;
+    b: i32 = 2;
+    c: *i32;
+};
+
+fn make(a: i32, b: i32) -> Ts {
+    return {.a = a, .b = b};
+}
+
+fn sum(value: Ts) -> i32 {
+    return value.a + value.b;
+}
+
+fn changed(value: Ts) -> Ts {
+    result: Ts = value;
+    result.a = 9;
+    return result;
+}
+
+fn main() -> i32 {
+    t1: Ts = {};
+    t2: Ts = {.a = 1, .b = 2, .c = null};
+    if (t1.a != 0 || t1.b != 2 || t1.c != null) { return 1; }
+    t1.a = 1;
+    t1.c = null;
+    t3: Ts = make(3, 4);
+    t4: Ts = changed(t3);
+    if (sum(t2) != 3 || sum(t3) != 7 || t3.a != 3 || t4.a != 9) { return 2; }
+    return 0;
+}

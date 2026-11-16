@@ -11,6 +11,7 @@ typedef struct {
     size_t functions_cap, parameters_cap, statements_cap, expressions_cap, arguments_cap;
     size_t blocks_cap, block_statements_cap, statement_depth;
     size_t depth;
+    size_t imports_cap, globals_cap, structs_cap, fields_cap, initializers_cap;
 } Parser;
 
 static bool fail(Parser *p, const char *message) {
@@ -30,9 +31,10 @@ static bool expect(Parser *p, AtriTokenKind kind, const char *message) {
     return !p->failed;
 }
 static bool append_expr(Parser *p, AtriExpr e, AtriId *id) {
+    /* 左结合长链不会显著增加解析递归深度，但仍会生成深树；单独限制树高以保护后续遍历。 */
     e.tree_depth = 1;
     if (e.kind == ATRI_EXPR_UNARY || e.kind == ATRI_EXPR_BINARY ||
-        e.kind == ATRI_EXPR_ADDRESS || e.kind == ATRI_EXPR_DEREFERENCE)
+        e.kind == ATRI_EXPR_ADDRESS || e.kind == ATRI_EXPR_DEREFERENCE || e.kind == ATRI_EXPR_FIELD)
         e.tree_depth = p->program.expressions[e.left].tree_depth + 1;
     if (e.kind == ATRI_EXPR_BINARY && p->program.expressions[e.right].tree_depth + 1 > e.tree_depth)
         e.tree_depth = p->program.expressions[e.right].tree_depth + 1;
@@ -51,6 +53,35 @@ static bool parse_expression(Parser *p, int minimum, AtriId *result);
 
 static bool parse_primary(Parser *p, AtriId *result) {
     AtriToken token = p->current;
+    if (token.kind == ATRI_TOKEN_LEFT_BRACE) {
+        AtriExpr e = {.kind = ATRI_EXPR_INITIALIZER, .span.start = token.span.start};
+        AtriInitializer *items = NULL;
+        size_t count = 0, capacity = 0;
+        bool ok = false;
+        advance(p);
+        while (p->current.kind != ATRI_TOKEN_RIGHT_BRACE) {
+            AtriInitializer item;
+            if (!expect(p, ATRI_TOKEN_DOT, "expected '.field = expression' in struct initializer")) { goto initializer_done; }
+            item.name = p->current.span;
+            if (!expect(p, ATRI_TOKEN_IDENTIFIER, "expected field name") ||
+                !expect(p, ATRI_TOKEN_EQUAL, "expected '=' after field name") ||
+                !parse_expression(p, 0, &item.expression)) { goto initializer_done; }
+            if (!atri_append((void **)&items, &count, &capacity, sizeof(item), &item)) { fail(p, "out of memory"); goto initializer_done; }
+            if (p->current.kind != ATRI_TOKEN_COMMA) { break; }
+            advance(p);
+        }
+        e.span.end = p->current.span.end;
+        if (!expect(p, ATRI_TOKEN_RIGHT_BRACE, "expected '}' after struct initializer")) { goto initializer_done; }
+        e.first_argument = p->program.initializer_count; e.argument_count = count;
+        for (size_t i = 0; i < count; ++i) {
+            if (!atri_append((void **)&p->program.initializers, &p->program.initializer_count, &p->initializers_cap, sizeof(items[i]), &items[i])) {
+                fail(p, "out of memory"); goto initializer_done;
+            }
+        }
+        ok = append_expr(p, e, result);
+initializer_done:
+        free(items); return ok;
+    }
     if (token.kind == ATRI_TOKEN_TRUE || token.kind == ATRI_TOKEN_FALSE) {
         advance(p);
         return !p->failed && append_expr(p, (AtriExpr){.kind = ATRI_EXPR_BOOL,
@@ -66,12 +97,25 @@ static bool parse_primary(Parser *p, AtriId *result) {
         return !p->failed && append_expr(p, (AtriExpr){
             .kind = ATRI_EXPR_INTEGER, .span = token.span, .text = token.span}, result);
     }
+    if (token.kind == ATRI_TOKEN_STRING) {
+        advance(p);
+        return !p->failed && append_expr(p, (AtriExpr){
+            .kind = ATRI_EXPR_STRING, .span = token.span, .text = token.span}, result);
+    }
     if (token.kind == ATRI_TOKEN_IDENTIFIER) {
         advance(p);
         if (p->failed) return false;
         AtriExpr e = {.kind = ATRI_EXPR_NAME, .span = token.span, .text = token.span};
+        if (p->current.kind == ATRI_TOKEN_SCOPE) {
+            e.qualifier = token.span;
+            advance(p);
+            e.text = p->current.span;
+            e.span.end = e.text.end;
+            if (!expect(p, ATRI_TOKEN_IDENTIFIER, "expected a module member after '::'")) return false;
+        }
         if (p->current.kind == ATRI_TOKEN_LEFT_PAREN) {
             advance(p);
+            /* 嵌套调用会先写入自己的实参边；当前调用先暂存 ID，最后一次性追加以保持范围连续。 */
             AtriId *arguments = NULL;
             size_t count = 0, capacity = 0;
             bool success = false;
@@ -144,6 +188,7 @@ static int precedence(AtriTokenKind kind, AtriOp *op) {
         default: return -1;
     }
 }
+/* 优先级爬升：右侧只吸收更高优先级，当前层循环接续同级运算，因此二元运算左结合。 */
 static bool parse_expression(Parser *p, int minimum, AtriId *result) {
     if (++p->depth > 256) {
         --p->depth;
@@ -153,6 +198,13 @@ static bool parse_expression(Parser *p, int minimum, AtriId *result) {
     AtriId left;
     if (!parse_primary(p, &left)) goto done;
     for (;;) {
+        if (p->current.kind == ATRI_TOKEN_DOT) {
+            advance(p);
+            AtriExpr field = {.kind = ATRI_EXPR_FIELD, .left = left, .text = p->current.span,
+                .span = {p->program.expressions[left].span.start, p->current.span.end}};
+            if (!expect(p, ATRI_TOKEN_IDENTIFIER, "expected a field name after '.'") || !append_expr(p, field, &left)) { goto done; }
+            continue;
+        }
         AtriOp op = ATRI_ADD;
         int prec = precedence(p->current.kind, &op);
         if (prec < minimum) break;
@@ -174,13 +226,24 @@ static bool parse_type(Parser *p, AtriSpan *span, const char *message) {
     span->start = p->current.span.start;
     while (p->current.kind == ATRI_TOKEN_STAR) advance(p);
     span->end = p->current.span.end;
-    return expect(p, ATRI_TOKEN_IDENTIFIER, message);
+    if (!expect(p, ATRI_TOKEN_IDENTIFIER, message)) { return false; }
+    if (p->current.kind == ATRI_TOKEN_SCOPE) {
+        advance(p); span->end = p->current.span.end;
+        return expect(p, ATRI_TOKEN_IDENTIFIER, "expected a qualified type name");
+    }
+    return true;
 }
 static bool declaration_start(Parser *p) {
     if (p->current.kind != ATRI_TOKEN_IDENTIFIER) return false;
     AtriLexer lookahead = p->lexer;
     AtriDiagnostic ignored;
     return atri_lexer_next(&lookahead, &ignored).kind == ATRI_TOKEN_COLON;
+}
+static bool named_import_start(Parser *p) {
+    if (p->current.kind != ATRI_TOKEN_IDENTIFIER) { return false; }
+    AtriLexer lookahead = p->lexer;
+    AtriDiagnostic ignored;
+    return atri_lexer_next(&lookahead, &ignored).kind == ATRI_TOKEN_SCOPE;
 }
 static bool parse_statement(Parser *p, AtriId *id);
 static bool append_statement(Parser *p, AtriStatement s, AtriId *id) {
@@ -191,6 +254,7 @@ static bool append_statement(Parser *p, AtriStatement s, AtriId *id) {
 static bool parse_block(Parser *p, AtriId *id) {
     AtriBlock b = {.span.start = p->current.span.start};
     if (!expect(p, ATRI_TOKEN_LEFT_BRACE, "expected '{'; all control-flow bodies require braces")) return false;
+    /* 子块在递归中先完成；暂存本块的直接语句边，避免把子块语句混入同一连续范围。 */
     AtriId *items = NULL;
     size_t count = 0, capacity = 0;
     bool ok = false;
@@ -330,7 +394,30 @@ done:
 static bool parse_function(Parser *p) {
     AtriFunction f = {.span.start = p->current.span.start,
         .first_parameter = p->program.parameter_count,
-        .first_statement = p->program.statement_count};
+        .first_statement = p->program.statement_count, .block = ATRI_NONE};
+    if (p->current.kind == ATRI_TOKEN_ATTRIBUTE_OPEN) {
+        advance(p);
+        AtriSpan attribute = p->current.span;
+        if (p->current.kind != ATRI_TOKEN_IDENTIFIER || attribute.end-attribute.start != 6 ||
+            memcmp(p->lexer.source.text+attribute.start, "extern", 6) != 0) {
+            return fail(p, "only the extern(C) attribute is supported");
+        }
+        advance(p);
+        if (!expect(p, ATRI_TOKEN_LEFT_PAREN, "expected '(' after extern")) {
+            return false;
+        }
+        AtriSpan convention = p->current.span;
+        if (p->current.kind != ATRI_TOKEN_IDENTIFIER || convention.end-convention.start != 1 ||
+            p->lexer.source.text[convention.start] != 'C') {
+            return fail(p, "only the C calling convention is supported");
+        }
+        advance(p);
+        if (!expect(p, ATRI_TOKEN_RIGHT_PAREN, "expected ')' after extern(C") ||
+            !expect(p, ATRI_TOKEN_ATTRIBUTE_CLOSE, "expected ']]' after attribute")) {
+            return false;
+        }
+        f.external_c = true;
+    }
     if (!expect(p, ATRI_TOKEN_FN, "expected 'fn' at the top level")) return false;
     f.name = p->current.span;
     if (!expect(p, ATRI_TOKEN_IDENTIFIER, "expected a function name") ||
@@ -351,25 +438,98 @@ static bool parse_function(Parser *p) {
     if (!expect(p, ATRI_TOKEN_RIGHT_PAREN, "expected ')' after parameters") ||
         !expect(p, ATRI_TOKEN_ARROW, "expected '->' before the return type")) return false;
     if (!parse_type(p, &f.return_type, "expected a return type name")) return false;
-    if (!parse_block(p, &f.block)) return false;
-    f.body = p->program.blocks[f.block].span; f.span.end = f.body.end;
+    if (f.external_c) {
+        f.span.end = p->current.span.end;
+        if (!expect(p, ATRI_TOKEN_SEMICOLON, "extern(C) declarations require ';' and cannot have a body yet")) {
+            return false;
+        }
+    } else {
+        if (!parse_block(p, &f.block)) {
+            return false;
+        }
+        f.body = p->program.blocks[f.block].span; f.span.end = f.body.end;
+    }
     f.statement_count = p->program.statement_count - f.first_statement;
     return atri_append((void **)&p->program.functions, &p->program.function_count,
                        &p->functions_cap, sizeof(f), &f) || fail(p, "out of memory");
 }
-bool atri_parse(AtriSource source, AtriProgram *output, AtriDiagnostic *diagnostic) {
+static bool parse_struct(Parser *p, bool exported) {
+    AtriStruct structure = {.span.start = p->current.span.start, .first_field = p->program.field_count, .exported = exported};
+    advance(p); structure.name = p->current.span;
+    if (!expect(p, ATRI_TOKEN_IDENTIFIER, "expected a struct name") ||
+        !expect(p, ATRI_TOKEN_LEFT_BRACE, "expected '{' after struct name")) { return false; }
+    while (p->current.kind != ATRI_TOKEN_RIGHT_BRACE) {
+        AtriField field = {.name = p->current.span, .expression = ATRI_NONE};
+        if (!expect(p, ATRI_TOKEN_IDENTIFIER, "expected a struct field name") ||
+            !expect(p, ATRI_TOKEN_COLON, "expected ':' after field name") ||
+            !parse_type(p, &field.type, "expected field type")) { return false; }
+        if (p->current.kind == ATRI_TOKEN_EQUAL) {
+            advance(p); if (!parse_expression(p, 0, &field.expression)) { return false; }
+        }
+        if (!expect(p, ATRI_TOKEN_SEMICOLON, "expected ';' after struct field") ||
+            !atri_append((void **)&p->program.fields, &p->program.field_count, &p->fields_cap, sizeof(field), &field)) { return fail(p, "cannot append struct field"); }
+    }
+    structure.field_count = p->program.field_count-structure.first_field;
+    structure.span.end = p->current.span.end; advance(p);
+    if (p->current.kind == ATRI_TOKEN_SEMICOLON) { advance(p); }
+    return atri_append((void **)&p->program.structs, &p->program.struct_count, &p->structs_cap, sizeof(structure), &structure) || fail(p, "out of memory");
+}
+bool atri_parse_sources(AtriSource source, const AtriModule *modules, size_t count, AtriProgram *output, AtriDiagnostic *diagnostic) {
     *output = (AtriProgram){0};
     *diagnostic = (AtriDiagnostic){0};
     Parser p = {.lexer = atri_lexer_create(source), .diagnostic = diagnostic};
+    size_t module = 0;
+    if (count) { p.lexer.source.length = modules[0].span.end; }
     advance(&p);
-    while (!p.failed && p.current.kind != ATRI_TOKEN_EOF) {
-        if (!parse_function(&p)) break;
+    while (!p.failed) {
+        if (p.current.kind == ATRI_TOKEN_EOF) {
+            if (++module >= count) { break; }
+            p.lexer.offset = modules[module].span.start;
+            p.lexer.source.length = modules[module].span.end;
+            if (p.lexer.source.length-p.lexer.offset >= 3 &&
+                !memcmp(source.text+p.lexer.offset, "\xEF\xBB\xBF", 3)) { p.lexer.offset += 3; }
+            advance(&p); continue;
+        }
+        bool exported = false;
+        if (p.current.kind == ATRI_TOKEN_EXPORT) { exported = true; advance(&p); }
+        if (p.current.kind == ATRI_TOKEN_STRUCT) {
+            if (!parse_struct(&p, exported)) { break; }
+        } else if (p.current.kind == ATRI_TOKEN_IMPORT ||
+            named_import_start(&p)) {
+            if (exported) { fail(&p, "re-exporting imports is not supported"); break; }
+            AtriImport item = {.target = ATRI_NONE};
+            if (p.current.kind == ATRI_TOKEN_IDENTIFIER) {
+                item.name = p.current.span; advance(&p);
+                if (!expect(&p, ATRI_TOKEN_SCOPE, "expected '::' before import")) break;
+            }
+            if (!expect(&p, ATRI_TOKEN_IMPORT, "expected import")) break;
+            item.path = p.current.span;
+            if (!expect(&p, ATRI_TOKEN_STRING, "expected a module path") ||
+                !expect(&p, ATRI_TOKEN_SEMICOLON, "expected ';' after import")) break;
+            if (!atri_append((void **)&p.program.imports, &p.program.import_count, &p.imports_cap, sizeof(item), &item)) { fail(&p, "out of memory"); break; }
+        } else if (declaration_start(&p)) {
+            AtriGlobal item = {.declaration = new_statement(&p), .exported = exported};
+            if (!simple_statement(&p, &item.declaration, true)) { break; }
+            item.declaration.span.end = p.current.span.end;
+            if (!expect(&p, ATRI_TOKEN_SEMICOLON, "expected ';' after global declaration")) { break; }
+            if (item.declaration.kind == ATRI_STMT_CONSTANT && item.declaration.expression == ATRI_NONE) { fail(&p, "compile-time constants require an initializer"); break; }
+            if (!atri_append((void **)&p.program.globals, &p.program.global_count, &p.globals_cap, sizeof(item), &item)) { fail(&p, "out of memory"); break; }
+        } else {
+            if (!parse_function(&p)) break;
+            p.program.functions[p.program.function_count-1].exported = exported;
+        }
     }
     if (p.failed) { atri_program_destroy(&p.program); return false; }
     *output = p.program;
     return true;
 }
+bool atri_parse(AtriSource source, AtriProgram *output, AtriDiagnostic *diagnostic) {
+    return atri_parse_sources(source, NULL, 0, output, diagnostic);
+}
 void atri_program_destroy(AtriProgram *p) {
+    for (size_t i = 0; i < p->module_count; ++i) { free(p->modules[i].path); }
+    free(p->structs); free(p->fields); free(p->initializers);
+    free(p->symbols); free(p->modules); free(p->imports); free(p->globals);
     free(p->functions); free(p->parameters); free(p->statements);
     free(p->expressions); free(p->arguments); free(p->blocks); free(p->block_statements);
     *p = (AtriProgram){0};
@@ -379,8 +539,23 @@ static void write_span(FILE *s, AtriSource source, AtriSpan span) {
 }
 static void dump_expr(FILE *s, AtriSource source, const AtriProgram *p, AtriId id) {
     const AtriExpr *e = &p->expressions[id];
-    if (e->kind == ATRI_EXPR_INTEGER || e->kind == ATRI_EXPR_NAME || e->kind == ATRI_EXPR_NULL || e->kind == ATRI_EXPR_BOOL) write_span(s, source, e->text);
-    else if (e->kind == ATRI_EXPR_CALL) {
+    if (e->kind == ATRI_EXPR_FIELD) {
+        dump_expr(s, source, p, e->left); fputc('.', s); write_span(s, source, e->text); return;
+    }
+    if (e->kind == ATRI_EXPR_INITIALIZER) {
+        fputc('{', s);
+        for (size_t i = 0; i < e->argument_count; ++i) {
+            const AtriInitializer *item = &p->initializers[e->first_argument+i];
+            fputs(i ? ", ." : ".", s); write_span(s, source, item->name); fputs(" = ", s); dump_expr(s, source, p, item->expression);
+        }
+        fputc('}', s); return;
+    }
+    if ((e->kind == ATRI_EXPR_NAME || e->kind == ATRI_EXPR_CALL) && e->qualifier.end) {
+        write_span(s, source, e->qualifier); fputs("::", s);
+    }
+    if (e->kind == ATRI_EXPR_INTEGER || e->kind == ATRI_EXPR_NAME || e->kind == ATRI_EXPR_NULL || e->kind == ATRI_EXPR_BOOL || e->kind == ATRI_EXPR_STRING) {
+        write_span(s, source, e->text);
+    } else if (e->kind == ATRI_EXPR_CALL) {
         write_span(s, source, e->text); fputc('(', s);
         for (size_t i = 0; i < e->argument_count; ++i) {
             if (i != 0) fputs(", ", s);
@@ -426,8 +601,37 @@ static void dump_statement(FILE *s, AtriSource source, const AtriProgram *p, Atr
 }
 void atri_dump_ast(FILE *s, AtriSource source, const AtriProgram *p) {
     fputs("Program\n", s);
+    for (size_t i = 0; i < p->struct_count; ++i) {
+        const AtriStruct *t = &p->structs[i];
+        fputs(t->exported ? "  Export Struct " : "  Struct ", s); write_span(s, source, t->name); fputc('\n', s);
+        for (size_t j = 0; j < t->field_count; ++j) {
+            const AtriField *f = &p->fields[t->first_field+j];
+            fputs("    Field ", s); write_span(s, source, f->name); fputs(": ", s); write_span(s, source, f->type);
+            if (f->expression != ATRI_NONE) { fputs(" = ", s); dump_expr(s, source, p, f->expression); }
+            fputc('\n', s);
+        }
+    }
+    for (size_t i = 0; i < p->import_count; ++i) {
+        fputs("  Import ", s);
+        if (p->imports[i].name.end) { write_span(s, source, p->imports[i].name); fputs(" :: ", s); }
+        write_span(s, source, p->imports[i].path); fputc('\n', s);
+    }
+    for (size_t i = 0; i < p->global_count; ++i) {
+        const AtriGlobal *g = &p->globals[i];
+        fputs(g->exported ? "  Export Global " : "  Global ", s);
+        write_span(s, source, g->declaration.name); fputs(": ", s); write_span(s, source, g->declaration.type);
+        if (g->declaration.expression != ATRI_NONE) {
+            fputs(g->declaration.kind == ATRI_STMT_CONSTANT ? " := " : " = ", s);
+            dump_expr(s, source, p, g->declaration.expression);
+        }
+        fputc('\n', s);
+    }
     for (size_t i = 0; i < p->function_count; ++i) {
         const AtriFunction *f = &p->functions[i];
+        if (f->external_c) {
+            fputs("  [[extern(C)]]\n", s);
+        }
+        if (f->exported) { fputs("  Export\n", s); }
         fputs("  Function ", s); write_span(s, source, f->name);
         fputs(" -> ", s); write_span(s, source, f->return_type); fputc('\n', s);
         for (size_t j = 0; j < f->parameter_count; ++j) {
@@ -435,6 +639,8 @@ void atri_dump_ast(FILE *s, AtriSource source, const AtriProgram *p) {
             fputs("    Parameter ", s); write_span(s, source, a->name);
             fputs(": ", s); write_span(s, source, a->type); fputc('\n', s);
         }
-        dump_block(s, source, p, f->block, 4);
+        if (!f->external_c) {
+            dump_block(s, source, p, f->block, 4);
+        }
     }
 }

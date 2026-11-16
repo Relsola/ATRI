@@ -1,0 +1,1 @@
+struct A { x: i32; } fn main()->i32{a:A={.y=1};return 0;}

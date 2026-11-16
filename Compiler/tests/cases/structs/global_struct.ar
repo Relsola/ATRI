@@ -1,0 +1,1 @@
+struct A{x:i32;} value:A;fn main()->i32{return 0;}

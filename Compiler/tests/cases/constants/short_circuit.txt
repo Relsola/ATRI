@@ -1,0 +1,8 @@
+fn f() -> bool {
+    result: bool := safe(0);
+    return result;
+}
+
+fn safe(n: i32) -> bool {
+    return n != 0 && 10 / n > 1;
+}

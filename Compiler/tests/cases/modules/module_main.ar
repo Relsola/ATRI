@@ -1,0 +1,16 @@
+import "state";
+s :: import "state";
+t :: import "./state";
+import "peer";
+fn main() -> i32 {
+    if (derived != 5 || counter != 3 || s::limit != 4 || wide != 4294967296 || ready || pointer != null) { return 1; }
+    counter = 10;
+    copy: i32 = t::counter;
+    if (bump_peer() != 11 || counter != 11 || copy != 10) { return 2; }
+    pointer = address();
+    *pointer = 12;
+    ready = true;
+    wide = wide + 1;
+    if (t::counter != 12 || !s::ready || t::wide != 4294967297) { return 3; }
+    return 0;
+}

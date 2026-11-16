@@ -1,0 +1,10 @@
+export counter: i32 = seed(2);
+export wide: i64 = 4294967296;
+export ready: bool;
+export pointer: *i32;
+export limit: i32 := seed(3);
+fn seed(n: i32) -> i32 { return n + 1; }
+fn helper() -> i32 { return 1; }
+export fn bump() -> i32 { counter = counter + helper(); return counter; }
+export fn address() -> *i32 { return &counter; }
+export derived: i32 := limit + 1;

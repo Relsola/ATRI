@@ -93,13 +93,13 @@ static void errors_and_growth(void) {
         {"fn f(a:i32,)->i32{}", "parameter name"}, {"fn f()->i32{const a:i32=0;}", "expected ':'"},
         {"fn f()->i32{let a:i32;}", "expected ':'"}, {"fn f()->i32{return;}", "integer expression"},
         {"fn f()->i32{a:i32 :=;return 0;}", "integer expression"},
-        {"fn f()->i32{a::1;return 0;}", "type inference"},
+        {"fn f()->i32{a::1;return 0;}", "module member"},
         {"fn f()->i32{a:i32:1;return 0;}", "expected ':='"},
         {"fn f()->i32{a:i32: =1;return 0;}", "expected ':='"},
         {"fn f()->i32{return 1+;}", "integer expression"}, {"fn f()->i32{return g(1,);}", "integer expression"},
         {"fn f()->i32{return (1+2;}", "expected ')'"}, {"fn f()->i32{return 0}", "expected ';'"},
         {"fn f()->i32{return 1_000;}", "only decimal"}, {"fn f()->i32{return 0x10;}", "only decimal"},
-        {"fn f()->i32{return 1.5;}", "unexpected character"}, {"fn f()->i32{", "expected '}'"},
+        {"fn f()->i32{return 1.5;}", "floating-point"}, {"fn f()->i32{", "expected '}'"},
         {"fn f()->i32{}@", "unexpected character"}, {"fnmain()->i32{}", "top level"}
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) reject(source(cases[i].input), cases[i].message);
@@ -118,7 +118,49 @@ static void errors_and_growth(void) {
     for (size_t i = 0; i < 300; ++i) { memcpy(deep + used, "+1", 2); used += 2; }
     memcpy(deep + used, ";}", 3); reject(source(deep), "limit of 256");
 }
+static void attributes_and_strings(void) {
+    AtriSource s = source("[[\nextern ( C )\n]] fn puts(text: *char) -> i32;\n"
+        "fn main()->i32{puts(\"Hello\\n\\x41\\0tail\");return 0;}");
+    AtriProgram p; AtriDiagnostic d;
+    CHECK(atri_parse(s, &p, &d));
+    CHECK(p.function_count == 2 && p.functions[0].external_c && !p.functions[1].external_c);
+    CHECK(p.functions[0].block == ATRI_NONE && p.functions[0].statement_count == 0);
+    CHECK(p.functions[0].span.start == 0 && text(s, p.parameters[0].type, "*char"));
+    const AtriExpr *call = &p.expressions[p.statements[0].expression];
+    const AtriExpr *string = &p.expressions[p.arguments[call->first_argument]];
+    CHECK(string->kind == ATRI_EXPR_STRING && text(s, string->text, "\"Hello\\n\\x41\\0tail\""));
+    atri_program_destroy(&p);
+
+    reject(source("[[unknown(C)]] fn f()->i32;"), "extern(C)");
+    reject(source("[[extern(c)]] fn f()->i32;"), "C calling convention");
+    reject(source("[[extern C]] fn f()->i32;"), "expected '('");
+    reject(source("[[extern(C]] fn f()->i32;"), "expected ')'");
+    reject(source("[[extern(C) fn f()->i32;"), "expected ']]'");
+    reject(source("[[extern(C),other]] fn f()->i32;"), "expected ']]'");
+    reject(source("[[extern(C)]][[extern(C)]] fn f()->i32;"), "top level");
+    reject(source("[[extern(C)]] fn f()->i32{return 0;}"), "cannot have a body");
+    reject(source("fn f()->i32;"), "require braces");
+    reject(source("fn f()->*char{return \"bad\\q\";}"), "unsupported string escape");
+    reject(source("fn f()->*char{return \"bad\\x1\";}"), "two hexadecimal digits");
+    reject(source("fn f()->*char{return \"bad\\xG0\";}"), "two hexadecimal digits");
+    reject(source("fn f()->*char{return \"bad\nline\";}"), "newline");
+    reject(source("fn f()->*char{return \"unfinished"), "unterminated string");
+    const char raw_nul[] = "fn f()->*char{return \"raw\0nul\";}";
+    reject((AtriSource){"string NUL", raw_nul, sizeof(raw_nul)-1}, "NUL byte");
+}
+static void struct_ast(void) {
+    AtriSource input = source("struct P{x:i32=2;};fn f(p:*P)->P{a:P={.x=1,};(*p).x=a.x;return a;}");
+    AtriProgram program; AtriDiagnostic diagnostic;
+    CHECK(atri_parse(input, &program, &diagnostic));
+    CHECK(program.struct_count == 1 && program.field_count == 1 && program.initializer_count == 1);
+    CHECK(text(input, program.structs[0].name, "P"));
+    CHECK(program.expressions[program.fields[0].expression].kind == ATRI_EXPR_INTEGER);
+    CHECK(text(input, program.initializers[0].name, "x"));
+    const AtriExpr *target = &program.expressions[program.statements[1].target];
+    CHECK(target->kind == ATRI_EXPR_FIELD && program.expressions[target->left].kind == ATRI_EXPR_DEREFERENCE);
+    atri_program_destroy(&program);
+}
 int main(void) {
-    ast_and_precedence(); lexical_and_locations(); pointer_ast(); errors_and_growth();
+    struct_ast(); ast_and_precedence(); lexical_and_locations(); pointer_ast(); errors_and_growth(); attributes_and_strings();
     puts("frontend tests passed"); return 0;
 }

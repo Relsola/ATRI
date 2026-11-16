@@ -1,0 +1,4 @@
+export struct Vec { a: i32 = seed(); b: i32; }
+struct Hidden { a: i32; }
+fn seed() -> i32 { return 4; }
+export fn pass(value: Vec) -> Vec { return value; }

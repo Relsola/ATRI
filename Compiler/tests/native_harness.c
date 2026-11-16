@@ -1,24 +1,17 @@
-#include <stdint.h>
-#include <stdio.h>
+#include "native_expect.h"
+#include "native_harness_bindings.h"
 
-extern int32_t atri_fn_0(int32_t, int32_t, int32_t, int32_t, int32_t, int32_t);
-extern int32_t atri_fn_1(int32_t, int32_t);
-extern int32_t atri_fn_2(int32_t, int32_t);
-extern int32_t atri_fn_3(int32_t);
-extern int32_t atri_fn_4(int32_t, int32_t);
-extern int32_t atri_fn_5(int32_t);
-#define EXPECT(call, value) do { if ((call) != (value)) { fputs(#call " failed\n", stderr); return 1; } } while (0)
 int main(void) {
-    EXPECT(atri_fn_0(1, 2, 3, 4, 5, 6), 21);
-    EXPECT(atri_fn_1(-17, 5), -32);
-    EXPECT(atri_fn_1(17, -5), -28);
-    EXPECT(atri_fn_2(INT32_MAX, 1), INT32_MIN);
-    EXPECT(atri_fn_2(INT32_MIN, -1), INT32_MAX);
-    EXPECT(atri_fn_3(4), 20);
-    EXPECT(atri_fn_3(-4), -4);
-    EXPECT(atri_fn_4(-17, 5), -29);
-    EXPECT(atri_fn_4(17, -5), -1);
-    EXPECT(atri_fn_5(INT32_MIN), INT32_MIN);
-    EXPECT(atri_fn_5(-7), 7);
+    EXPECT_EQ(21, atri_test_sum6(1, 2, 3, 4, 5, 6));
+    EXPECT_EQ(-32, atri_test_divrem(-17, 5));
+    EXPECT_EQ(-28, atri_test_divrem(17, -5));
+    EXPECT_EQ(INT32_MIN, atri_test_wrap(INT32_MAX, 1));
+    EXPECT_EQ(INT32_MAX, atri_test_wrap(INT32_MIN, -1));
+    EXPECT_EQ(20, atri_test_bindings(4));
+    EXPECT_EQ(-4, atri_test_bindings(-4));
+    EXPECT_EQ(-29, atri_test_nested(-17, 5));
+    EXPECT_EQ(-1, atri_test_nested(17, -5));
+    EXPECT_EQ(INT32_MIN, atri_test_negate(INT32_MIN));
+    EXPECT_EQ(7, atri_test_negate(-7));
     return 0;
 }

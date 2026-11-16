@@ -1,226 +1,250 @@
-#include "ir.h"
-#include <stdlib.h>
-#include <string.h>
-#define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c); exit(1); } } while (0)
-static AtriSource source(const char *s) { return (AtriSource){"test.txt", s, strlen(s)}; }
-static void compile(const char *s, AtriProgram *ast, AtriIRProgram *ir) {
-    AtriDiagnostic d; CHECK(atri_parse(source(s), ast, &d));
-    if (!atri_lower(source(s), ast, ir, &d)) { fprintf(stderr, "%s\n", d.message); CHECK(false); }
+#include "test_support.h"
+
+static void expect_fold_i32(const char *expression, int64_t expected) {
+    char code[1024];
+    snprintf(code, sizeof(code), "fn main() -> i32 { return %s; }", expression);
+    Compilation test = test_compile(expression, code, TEST_O1);
+    EXPECT_RETURN_I32(test.after, "main", expected);
+    test_destroy(&test);
 }
-static void folded(const char *expression, int64_t expected) {
-    char s[1024]; snprintf(s, sizeof(s), "fn main()->i32{return %s;}", expression);
-    AtriProgram ast; AtriIRProgram ir; AtriDiagnostic d; compile(s, &ast, &ir);
-    CHECK(atri_optimize(&ir, true, &d));
-    AtriIRFunction *f = &ir.functions[0]; AtriIRInst ret = f->instructions[f->instruction_count - 1];
-    CHECK(f->instructions[ret.left].kind == ATRI_IR_CONST);
-    CHECK(atri_i32_signed(f->instructions[ret.left].immediate) == expected);
-    atri_ir_destroy(&ir); atri_program_destroy(&ast);
+
+static void expect_constant_i32(const char *code, int64_t expected) {
+    Compilation test = test_compile("i32 constant", code, TEST_O0);
+    EXPECT_RETURN_I32(test.before, "main", expected);
+    EXPECT_NO_CALLS(test.before, "main");
+    EXPECT_RETURN_I32(test.after, "main", expected);
+    EXPECT_OPERATIONS(test.after, "main", ATRI_IR_CONST, 1);
+    EXPECT_OPERATIONS(test.after, "main", ATRI_IR_RETURN, 1);
+    test_destroy(&test);
 }
-static void fail(const char *s, const char *message, bool optimize) {
-    AtriProgram ast; AtriIRProgram ir; AtriDiagnostic d;
-    CHECK(atri_parse(source(s), &ast, &d));
-    bool ok = atri_lower(source(s), &ast, &ir, &d);
-    if (ok && optimize) ok = atri_optimize(&ir, true, &d);
-    CHECK(!ok && d.message != NULL && strstr(d.message, message) != NULL);
-    CHECK(d.span.end <= strlen(s)); atri_ir_destroy(&ir); atri_program_destroy(&ast);
+
+static void expect_constant_i64(const char *expression, int64_t expected) {
+    char code[1024];
+    snprintf(code, sizeof(code), "fn wide() -> i64 { n: i64 := %s; return n; }", expression);
+    Compilation test = test_compile(expression, code, TEST_O1);
+    EXPECT_RETURN_I64(test.after, "wide", expected);
+    test_destroy(&test);
 }
+
 static void arithmetic(void) {
-    folded("1+2*3", 7); folded("(1+2)*3", 9); folded("10-3-2", 5);
-    folded("20/3/2", 3); folded("-17/5", -3); folded("-17%5", -2);
-    folded("17/-5", -3); folded("17%-5", 2); folded("-(-3)+ +2", 5);
-    folded("2147483647+1", INT64_C(-2147483648)); folded("-2147483648-1", INT32_MAX);
-    folded("65536*65536", 0); folded("-(-2147483648)", INT64_C(-2147483648));
-    fail("fn f()->i32{return 2147483648;}", "outside the i32", false);
-    fail("fn f()->i32{return -2147483649;}", "outside the i32", false);
-    fail("fn f()->i32{return 1/0;}", "by zero", true);
-    fail("fn f()->i32{return -2147483648%-1;}", "INT_MIN", true);
-    fail("fn f()->i32{return -2147483648/-1;}", "INT_MIN", true);
-    fail("fn f(x:i32)->i32{return x/0;}", "by zero", true);
+    expect_fold_i32("1+2*3", 7);
+    expect_fold_i32("(1+2)*3", 9);
+    expect_fold_i32("10-3-2", 5);
+    expect_fold_i32("20/3/2", 3);
+    expect_fold_i32("-17/5", -3);
+    expect_fold_i32("-17%5", -2);
+    expect_fold_i32("17/-5", -3);
+    expect_fold_i32("17%-5", 2);
+    expect_fold_i32("-(-3)+ +2", 5);
+    expect_fold_i32("2147483647+1", INT64_C(-2147483648));
+    expect_fold_i32("-2147483648-1", INT32_MAX);
+    expect_fold_i32("65536*65536", 0);
+    expect_fold_i32("-(-2147483648)", INT64_C(-2147483648));
+    EXPECT_COMPILE_ERROR("fn f()->i32{return 2147483648;}", "outside the i32");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return -2147483649;}", "outside the i32");
+    EXPECT_OPT_ERROR("fn f()->i32{return 1/0;}", "by zero");
+    EXPECT_OPT_ERROR("fn f()->i32{return -2147483648%-1;}", "INT_MIN");
+    EXPECT_OPT_ERROR("fn f()->i32{return -2147483648/-1;}", "INT_MIN");
+    EXPECT_OPT_ERROR("fn f(x:i32)->i32{return x/0;}", "by zero");
 }
 static void names_and_types(void) {
-    fail("fn f()->i32{x: i32 :=1;x=2;return x;}", "cannot assign", false);
-    fail("fn f(x:i32)->i32{x=2;return x;}", "cannot assign", false);
-    fail("fn f()->i32{x:u64=1;return x;}", "only i32", false);
-    fail("fn f()->i32{g: i32 :=1;return g();}", "not callable", false);
-    fail("fn f()->i32{x:i32;}", "must return", false);
-    fail("fn f()->i32{return a;a: i32 :=1;}", "unknown local", false);
-    fail("fn f()->i32{return missing();}", "unknown function", false);
-    fail("fn f()->i32{return g(1);}fn g()->i32{return 0;}", "argument count", false);
-    fail("fn f()->i32{return 0;}fn f()->i32{return 1;}", "duplicate function", false);
-    fail("fn f(a:i32,a:i32)->i32{return a;}", "duplicate local", false);
-    fail("fn f()->i32{a: i32 :=1;a: i32 :=2;return a;}", "duplicate local", false);
-    fail("fn f()->i32{a: i32 :=1;a=2;return a;}", "cannot assign", false);
-    fail("fn f()->i32{a:i32=a;return a;}", "unknown local", false);
-    fail("fn f()->i32{a=1;return 0;}", "unknown name", false);
-    fail("fn f()->i32{g: i32 :=1;return g();}", "not callable", false);
-    fail("fn f()->u64{return 1;}", "only i32", false);
-    fail("fn f(a:f32)->i32{return 1;}", "only i32", false);
-    fail("fn f()->i32{a: u64 :=1;return 0;}", "only i32", false);
-    fail("fn f()->i32{}", "must return", false);
-    fail("fn f()->i32{return 0;return missing;}", "unknown local", false);
-}
-static void calls_and_inline(void) {
-    const char *s = "fn main()->i32{a: i32 :=1;b: i32 :=2;return add(a,b);}"
-        "fn add(a:i32,b:i32)->i32{return a+b;}";
-    AtriProgram ast; AtriIRProgram ir; AtriDiagnostic d; compile(s, &ast, &ir);
-    CHECK(ir.functions[0].instructions[ir.functions[0].instruction_count - 2].kind == ATRI_IR_CALL);
-    CHECK(atri_optimize(&ir, true, &d)); CHECK(ir.functions[0].instruction_count == 2);
-    CHECK(ir.functions[0].instructions[0].kind == ATRI_IR_CONST && ir.functions[0].instructions[0].immediate == 3);
-    atri_ir_destroy(&ir); atri_program_destroy(&ast);
-    compile(s, &ast, &ir); CHECK(atri_optimize(&ir, false, &d));
-    CHECK(ir.functions[0].instructions[2].kind == ATRI_IR_CALL); atri_ir_destroy(&ir); atri_program_destroy(&ast);
-    s = "fn main()->i32{a:i32;a=a+2;return twice(a);}"
-        "fn twice(x:i32)->i32{y:i32=x+1;return y*2;}";
-    compile(s, &ast, &ir); CHECK(atri_optimize(&ir, true, &d));
-    AtriIRFunction *f = &ir.functions[0]; CHECK(f->instructions[f->instructions[f->instruction_count-1].left].immediate == 6);
-    atri_ir_destroy(&ir); atri_program_destroy(&ast);
-    s = "fn main()->i32{return a();}fn a()->i32{return b();}fn b()->i32{return c();}fn c()->i32{return 3;}";
-    compile(s, &ast, &ir); CHECK(atri_optimize(&ir, true, &d));
-    CHECK(ir.functions[0].instructions[0].immediate == 3); atri_ir_destroy(&ir); atri_program_destroy(&ast);
-    s = "fn a(x:i32)->i32{return b(x);}fn b(x:i32)->i32{return a(x);}";
-    compile(s, &ast, &ir); CHECK(atri_optimize(&ir, true, &d)); CHECK(ir.functions[0].instructions[1].kind == ATRI_IR_CALL);
-    atri_ir_destroy(&ir); atri_program_destroy(&ast);
-    s = "fn f()->i32{return 1;x:i32=3;y:i32=x+2;return y;}";
-    compile(s, &ast, &ir); CHECK(ir.functions[0].instruction_count == 2); atri_ir_destroy(&ir); atri_program_destroy(&ast);
-    fail("fn main()->i32{return divide(0);}fn divide(x:i32)->i32{return 10/x;}", "by zero", true);
-}
-static void verifier(void) {
-    const char *s = "fn main()->i32{return 1+2;}";
-    AtriProgram ast; AtriIRProgram ir; AtriDiagnostic d; compile(s, &ast, &ir);
-    ir.functions[0].instructions[2].left = 99; CHECK(!atri_ir_verify(&ir, &d));
-    ir.functions[0].instructions[2].left = 0;
-    ir.functions[0].instructions[3].kind = ATRI_IR_CONST; CHECK(!atri_ir_verify(&ir, &d));
-    atri_ir_destroy(&ir); atri_program_destroy(&ast);
+    EXPECT_COMPILE_ERROR("fn f()->i32{x: i32 :=1;x=2;return x;}", "cannot assign");
+    EXPECT_COMPILE_ERROR("fn f(x:i32)->i32{x=2;return x;}", "cannot assign");
+    EXPECT_COMPILE_ERROR("fn f()->i32{x:u64=1;return x;}", "only i32");
+    EXPECT_COMPILE_ERROR("fn f()->i32{g: i32 :=1;return g();}", "not callable");
+    EXPECT_COMPILE_ERROR("fn f()->i32{x:i32;}", "must return");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return a;a: i32 :=1;}", "unknown local");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return missing();}", "unknown function");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return g(1);}fn g()->i32{return 0;}", "argument count");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return 0;}fn f()->i32{return 1;}", "duplicate function");
+    EXPECT_COMPILE_ERROR("fn f(a:i32,a:i32)->i32{return a;}", "duplicate local");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a: i32 :=1;a: i32 :=2;return a;}", "duplicate local");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a: i32 :=1;a=2;return a;}", "cannot assign");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:i32=a;return a;}", "unknown local");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a=1;return 0;}", "unknown name");
+    EXPECT_COMPILE_ERROR("fn f()->i32{g: i32 :=1;return g();}", "not callable");
+    EXPECT_COMPILE_ERROR("fn f()->u64{return 1;}", "only i32");
+    EXPECT_COMPILE_ERROR("fn f(a:f32)->i32{return 1;}", "only i32");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a: u64 :=1;return 0;}", "only i32");
+    EXPECT_COMPILE_ERROR("fn f()->i32{}", "must return");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return 0;return missing;}", "unknown local");
 }
 static void pointers(void) {
-    const char *s = "fn main()->i32{a:i32=1;p:*i32=&a;*p=2;return a;}";
-    AtriProgram ast; AtriIRProgram ir; AtriDiagnostic d; compile(s, &ast, &ir);
-    size_t locals = 0, stores = 0, loads = 0;
-    for (size_t i = 0; i < ir.functions[0].instruction_count; ++i) {
-        AtriIRKind kind = ir.functions[0].instructions[i].kind;
-        locals += kind == ATRI_IR_LOCAL; stores += kind == ATRI_IR_STORE; loads += kind == ATRI_IR_LOAD;
-    }
-    CHECK(locals == 1 && stores == 2 && loads == 1);
-    CHECK(atri_optimize(&ir, true, &d));
-    AtriIRFunction *f = &ir.functions[0];
-    CHECK(f->instructions[f->instructions[f->instruction_count - 1].left].kind == ATRI_IR_LOAD);
-    atri_ir_destroy(&ir); atri_program_destroy(&ast);
-    s = "fn f(p:*i32)->*i32{return p;}";
-    compile(s, &ast, &ir); CHECK(ir.functions[0].parameter_types[0] == ATRI_IR_PTR_I32 && ir.functions[0].return_type == ATRI_IR_PTR_I32);
-    CHECK(atri_optimize(&ir, true, &d)); atri_ir_destroy(&ir); atri_program_destroy(&ast);
-    fail("fn f()->i32{x:i32=1;p:*i32=x;return 0;}", "type mismatch", false);
-    fail("fn f()->i32{p:*i32=0;return 0;}", "type mismatch", false);
-    fail("fn f()->i32{p:*i32=null;return p;}", "type mismatch", false);
-    fail("fn f()->i32{return *1;}", "type mismatch", false);
-    fail("fn f()->i32{p:*i32;return p+1;}", "null pointer", false);
-    fail("fn f()->i32{x:i32;return &x;}", "type mismatch", false);
-    fail("fn f()->i32{x:i32;return g(&x);}fn g(x:i32)->i32{return x;}", "type mismatch", false);
-    fail("fn f()->i32{p:**i32;return 0;}", "one-level", false);
-    fail("fn f()->i32{p:*i32;pp:*i32=&p;return 0;}", "taking the address", false);
-    fail("fn f()->i32{x:i32 :=1;p:*i32=&x;return 0;}", "cannot take the address", false);
-    fail("fn f(x:i32)->i32{p:*i32=&x;return 0;}", "cannot take the address", false);
-    fail("fn f()->i32{p:*i32=&(1+2);return 0;}", "addressable", false);
-    fail("fn f()->i32{(1+2)=3;return 0;}", "assignment requires", false);
-    fail("fn f()->*i32{x:i32=1;return &x;}", "address of a local", false);
-    fail("fn f()->i32{p:*i32;return *p;}", "null pointer", false);
-    fail("fn f()->i32{p:*i32=null;*p=1;return 0;}", "null pointer", false);
-    fail("fn f()->i32{x:i32=null;return x;}", "null requires a pointer", false);
-    fail("fn f()->i32{p:*i32 :=null;return 0;}", "compile-time pointer constants", false);
-    fail("fn main()->i32{n:i32 :=f();return n;}fn f()->i32{x:i32;p:*i32=&x;*p=3;return x;}", "compile-time pointer operations", false);
-    s = "fn f(p:*i32,x:i32)->i32{*p=x;return *p;}";
-    compile(s, &ast, &ir);
-    for (size_t i = 0; i < ir.functions[0].instruction_count; ++i)
-        if (ir.functions[0].instructions[i].kind == ATRI_IR_STORE) ir.functions[0].instructions[i].left = 1;
-    CHECK(!atri_ir_verify(&ir, &d)); atri_ir_destroy(&ir); atri_program_destroy(&ast);
-}
-static void constant_program(const char *s, int64_t expected) {
-    AtriProgram ast; AtriIRProgram ir; AtriDiagnostic d; compile(s, &ast, &ir);
-    AtriIRFunction *f = &ir.functions[0];
-    AtriIRInst ret = f->instructions[f->instruction_count - 1];
-    CHECK(f->instructions[ret.left].kind == ATRI_IR_CONST);
-    CHECK(atri_i32_signed(f->instructions[ret.left].immediate) == expected);
-    for (size_t i = 0; i < f->instruction_count; ++i) CHECK(f->instructions[i].kind != ATRI_IR_CALL);
-    CHECK(atri_optimize(&ir, false, &d));
-    ret = f->instructions[f->instruction_count - 1];
-    CHECK(f->instructions[ret.left].kind == ATRI_IR_CONST);
-    CHECK(atri_i32_signed(f->instructions[ret.left].immediate) == expected);
-    size_t live = 0;
-    for (size_t i = 0; i < f->instruction_count; ++i)
-        if (f->instructions[i].kind != ATRI_IR_NOP) ++live;
-    CHECK(live == 2);
-    atri_ir_destroy(&ir); atri_program_destroy(&ast);
-}
-static void wide_integer(const char *expression, int64_t expected) {
-    char s[1024]; snprintf(s, sizeof(s), "fn wide()->i64{n:i64 :=%s;return n;}", expression);
-    AtriProgram ast; AtriIRProgram ir; AtriDiagnostic d; compile(s, &ast, &ir);
-    CHECK(atri_optimize(&ir, true, &d));
-    AtriIRFunction *f = &ir.functions[0];
-    const AtriIRInst *ret = &f->instructions[f->instruction_count - 1];
-    const AtriIRInst *v = &f->instructions[ret->left];
-    CHECK(v->kind == ATRI_IR_CONST && v->type == ATRI_IR_I64 && atri_i64_signed(v->immediate) == expected);
-    atri_ir_destroy(&ir); atri_program_destroy(&ast);
+    Compilation test = test_compile("pointer aliases",
+        "fn main() -> i32 {\n"
+        "    a: i32 = 1;\n"
+        "    p: *i32 = &a;\n"
+        "    *p = 2;\n"
+        "    return a;\n"
+        "}\n", TEST_O1);
+    EXPECT_OPERATIONS(test.before, "main", ATRI_IR_LOCAL, 1);
+    EXPECT_OPERATIONS(test.before, "main", ATRI_IR_STORE, 2);
+    EXPECT_OPERATIONS(test.before, "main", ATRI_IR_LOAD, 1);
+    AtriIRFunction *main = test_function(&test.after, "main");
+    AtriId returned = test_instruction(&test.after, "main", ATRI_IR_RETURN, 0);
+    CHECK(main->instructions[main->instructions[returned].left].kind == ATRI_IR_LOAD);
+    test_destroy(&test);
+
+    test = test_compile("pointer signature", "fn identity(p: *i32) -> *i32 { return p; }", TEST_O1);
+    AtriIRFunction *identity = test_function(&test.after, "identity");
+    CHECK(identity->parameter_types[0] == ATRI_IR_PTR_I32);
+    CHECK(identity->return_type == ATRI_IR_PTR_I32);
+    test_destroy(&test);
+
+    EXPECT_COMPILE_ERROR("fn f()->i32{x:i32=1;p:*i32=x;return 0;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->i32{p:*i32=0;return 0;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->i32{p:*i32=null;return p;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return *1;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->i32{p:*i32;return p+1;}", "null pointer");
+    EXPECT_COMPILE_ERROR("fn f()->i32{x:i32;return &x;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->i32{x:i32;return g(&x);}fn g(x:i32)->i32{return x;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->i32{p:**i32;return 0;}", "one-level");
+    EXPECT_COMPILE_ERROR("fn f()->i32{p:*i32;pp:*i32=&p;return 0;}", "taking the address");
+    EXPECT_COMPILE_ERROR("fn f()->i32{x:i32 :=1;p:*i32=&x;return 0;}", "cannot take the address");
+    EXPECT_COMPILE_ERROR("fn f(x:i32)->i32{p:*i32=&x;return 0;}", "cannot take the address");
+    EXPECT_COMPILE_ERROR("fn f()->i32{p:*i32=&(1+2);return 0;}", "addressable");
+    EXPECT_COMPILE_ERROR("fn f()->i32{(1+2)=3;return 0;}", "assignment requires");
+    EXPECT_COMPILE_ERROR("fn f()->*i32{x:i32=1;return &x;}", "address of a local");
+    EXPECT_COMPILE_ERROR("fn f()->i32{p:*i32;return *p;}", "null pointer");
+    EXPECT_COMPILE_ERROR("fn f()->i32{p:*i32=null;*p=1;return 0;}", "null pointer");
+    EXPECT_COMPILE_ERROR("fn f()->i32{x:i32=null;return x;}", "null requires a pointer");
+    EXPECT_COMPILE_ERROR("fn f()->i32{p:*i32 :=null;return 0;}", "compile-time pointer constants");
+    EXPECT_COMPILE_ERROR("fn main()->i32{n:i32 :=f();return n;}fn f()->i32{x:i32;p:*i32=&x;*p=3;return x;}", "compile-time pointer operations");
 }
 static void pointer_arithmetic(void) {
-    AtriProgram ast; AtriIRProgram ir; AtriDiagnostic d;
-    const char *s = "fn move(p:*i32,n:i32)->*i32{return n+p;}fn distance(p:*i32,q:*i32)->i64{return p-q;}";
-    compile(s, &ast, &ir);
-    AtriIRInst *offset = &ir.functions[0].instructions[2];
-    CHECK(offset->kind == ATRI_IR_PTR_OFFSET && offset->type == ATRI_IR_PTR_I32);
-    CHECK(ir.functions[0].instructions[offset->left].type == ATRI_IR_PTR_I32);
-    CHECK(ir.functions[0].instructions[offset->right].type == ATRI_IR_I32);
-    CHECK(ir.functions[1].instructions[2].kind == ATRI_IR_PTR_DIFF && ir.functions[1].return_type == ATRI_IR_I64);
-    AtriId saved = offset->right; offset->right = offset->left;
-    CHECK(!atri_ir_verify(&ir, &d)); offset->right = saved;
-    CHECK(atri_optimize(&ir, true, &d)); atri_ir_destroy(&ir); atri_program_destroy(&ast);
-    fail("fn f(p:*i32,q:*i32)->*i32{return p+q;}", "cannot add two pointers", false);
-    fail("fn f(p:*i32)->*i32{return 1-p;}", "subtract a pointer from an integer", false);
-    fail("fn f(p:*i32)->*i32{return p*2;}", "supports only", false);
-    fail("fn f(p:*i32)->*i32{return +p;}", "type mismatch", false);
-    fail("fn f()->*i32{return +null;}", "null requires a pointer", false);
-    fail("fn f(p:*i32,q:*i32)->i32{return p-q;}", "type mismatch", false);
-    fail("fn f()->*i32{return null+0;}", "null pointer", false);
-    fail("fn f()->i64{return null-null;}", "null pointer", false);
-    fail("fn f(p:*i32)->*i32{return p+9223372036854775807;}", "signed 64-bit range", true);
-    fail("fn f(p:*i32)->*i32{return p-(-9223372036854775808);}", "signed 64-bit range", true);
-    fail("fn f(x:i32,y:i64)->i64{return x+y;}", "type mismatch", false);
-    fail("fn f(p:*i32)->i32{x:i32=p-p;return x;}", "type mismatch", false);
-    fail("fn f()->i64{return 9223372036854775808;}", "i64 range", false);
-    fail("fn f()->i64{return -9223372036854775809;}", "i64 range", false);
-    fail("fn f()->i64{n:i64 :=1/0;return n;}", "by zero", false);
-    fail("fn f()->i64{n:i64 :=-9223372036854775808/-1;return n;}", "INT_MIN", false);
-    fail("fn f()->i64{n:i64 :=-9223372036854775808%-1;return n;}", "INT_MIN", false);
-    fail("fn f()->i64{x:i64=1;p:*i32=&x;return x;}", "only i32 variables", false);
-    wide_integer("5000000000+7", INT64_C(5000000007));
-    wide_integer("+5000000000", INT64_C(5000000000));
-    wide_integer("9223372036854775807+1", INT64_MIN);
-    wide_integer("-9223372036854775808-1", INT64_MAX);
-    wide_integer("4294967296*4294967296", 0);
-    wide_integer("-(-9223372036854775808)", INT64_MIN);
-    wide_integer("-17/5", -3); wide_integer("-17%5", -2);
+    Compilation test = test_compile("pointer arithmetic types",
+        "fn move(p: *i32, n: i32) -> *i32 { return n + p; }\n"
+        "fn distance(p: *i32, q: *i32) -> i64 { return p - q; }\n", TEST_O1);
+    AtriIRFunction *move = test_function(&test.before, "move");
+    AtriId offset_id = test_instruction(&test.before, "move", ATRI_IR_PTR_OFFSET, 0);
+    const AtriIRInst *offset = &move->instructions[offset_id];
+    CHECK(offset->type == ATRI_IR_PTR_I32);
+    CHECK(move->instructions[offset->left].type == ATRI_IR_PTR_I32);
+    CHECK(move->instructions[offset->right].type == ATRI_IR_I32);
+    EXPECT_OPERATIONS(test.before, "distance", ATRI_IR_PTR_DIFF, 1);
+    CHECK(test_function(&test.before, "distance")->return_type == ATRI_IR_I64);
+    test_destroy(&test);
+
+    EXPECT_COMPILE_ERROR("fn f(p:*i32,q:*i32)->*i32{return p+q;}", "cannot add two pointers");
+    EXPECT_COMPILE_ERROR("fn f(p:*i32)->*i32{return 1-p;}", "subtract a pointer from an integer");
+    EXPECT_COMPILE_ERROR("fn f(p:*i32)->*i32{return p*2;}", "supports only");
+    EXPECT_COMPILE_ERROR("fn f(p:*i32)->*i32{return +p;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->*i32{return +null;}", "null requires a pointer");
+    EXPECT_COMPILE_ERROR("fn f(p:*i32,q:*i32)->i32{return p-q;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->*i32{return null+0;}", "null pointer");
+    EXPECT_COMPILE_ERROR("fn f()->i64{return null-null;}", "null pointer");
+    EXPECT_OPT_ERROR("fn f(p:*i32)->*i32{return p+9223372036854775807;}", "signed 64-bit range");
+    EXPECT_OPT_ERROR("fn f(p:*i32)->*i32{return p-(-9223372036854775808);}", "signed 64-bit range");
+    EXPECT_COMPILE_ERROR("fn f(x:i32,y:i64)->i64{return x+y;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f(p:*i32)->i32{x:i32=p-p;return x;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->i64{return 9223372036854775808;}", "i64 range");
+    EXPECT_COMPILE_ERROR("fn f()->i64{return -9223372036854775809;}", "i64 range");
+    EXPECT_COMPILE_ERROR("fn f()->i64{n:i64 :=1/0;return n;}", "by zero");
+    EXPECT_COMPILE_ERROR("fn f()->i64{n:i64 :=-9223372036854775808/-1;return n;}", "INT_MIN");
+    EXPECT_COMPILE_ERROR("fn f()->i64{n:i64 :=-9223372036854775808%-1;return n;}", "INT_MIN");
+    EXPECT_COMPILE_ERROR("fn f()->i64{x:i64=1;p:*i32=&x;return x;}", "only i32 variables");
+    expect_constant_i64("5000000000+7", INT64_C(5000000007));
+    expect_constant_i64("+5000000000", INT64_C(5000000000));
+    expect_constant_i64("9223372036854775807+1", INT64_MIN);
+    expect_constant_i64("-9223372036854775808-1", INT64_MAX);
+    expect_constant_i64("4294967296*4294967296", 0);
+    expect_constant_i64("-(-9223372036854775808)", INT64_MIN);
+    expect_constant_i64("-17/5", -3); expect_constant_i64("-17%5", -2);
 }
 static void compile_time_constants(void) {
-    constant_program("fn main()->i32{a:i32 :=1;b:i32 :=a+2;return b;}", 3);
-    constant_program("fn main()->i32{n:i32 :=add(1,2);return n;}fn add(a:i32,b:i32)->i32{return a+b;}", 3);
-    constant_program("fn main()->i32{n:i32 :=helper(3);return n;}"
+    expect_constant_i32("fn main()->i32{a:i32 :=1;b:i32 :=a+2;return b;}", 3);
+    expect_constant_i32("fn main()->i32{n:i32 :=add(1,2);return n;}fn add(a:i32,b:i32)->i32{return a+b;}", 3);
+    expect_constant_i32("fn main()->i32{n:i32 :=helper(3);return n;}"
         "fn helper(x:i32)->i32{a:i32=x;a=a*2;k:i32 :=4;return a+k;}", 10);
-    constant_program("fn main()->i32{n:i32 :=f(2);return n;}"
+    expect_constant_i32("fn main()->i32{n:i32 :=f(2);return n;}"
         "fn f(x:i32)->i32{return g(x)+1;}fn g(x:i32)->i32{return x*3;}", 7);
-    constant_program("fn main()->i32{n:i32 :=2147483647+1;return n;}", INT64_C(-2147483648));
-    constant_program("fn main()->i32{n:i32 :=-17%5;return n;}", -2);
-    fail("fn f(x:i32)->i32{n:i32 :=x+1;return n;}", "runtime variable or parameter", false);
-    fail("fn main()->i32{a:i32=1;n:i32 :=a+1;return n;}", "runtime variable or parameter", false);
-    fail("fn main()->i32{n:i32 :=divide(0);return n;}fn divide(x:i32)->i32{return 1/x;}", "by zero", false);
-    fail("fn main()->i32{n:i32 :=1/0;return n;}", "by zero", false);
-    fail("fn main()->i32{n:i32 :=-2147483648/-1;return n;}", "INT_MIN", false);
-    fail("fn main()->i32{return 1;n:i32 :=1/0;}", "by zero", false);
-    fail("fn main()->i32{n:i32 :=recurse(0);return n;}fn recurse(x:i32)->i32{return recurse(x);}", "depth limit", false);
-    fail("fn main()->i32{n:i32 :=f();return n;}fn f()->i32{m:i32 :=main();return m;}", "cyclic compile-time", false);
-    fail("fn main()->i32{n:i32 :=f();return n;}fn f()->i32{x:i32 :=recurse();return 3;}fn recurse()->i32{return recurse();}", "depth limit", false);
-    fail("fn main()->i32{n:i32 :=f();return n;}fn f()->i32{x:i32=recurse();return 3;}fn recurse()->i32{return recurse();}", "depth limit", false);
+    expect_constant_i32("fn main()->i32{n:i32 :=2147483647+1;return n;}", INT64_C(-2147483648));
+    expect_constant_i32("fn main()->i32{n:i32 :=-17%5;return n;}", -2);
+    EXPECT_COMPILE_ERROR("fn f(x:i32)->i32{n:i32 :=x+1;return n;}", "runtime variable or parameter");
+    EXPECT_COMPILE_ERROR("fn main()->i32{a:i32=1;n:i32 :=a+1;return n;}", "runtime variable or parameter");
+    EXPECT_COMPILE_ERROR("fn main()->i32{n:i32 :=divide(0);return n;}fn divide(x:i32)->i32{return 1/x;}", "by zero");
+    EXPECT_COMPILE_ERROR("fn main()->i32{n:i32 :=1/0;return n;}", "by zero");
+    EXPECT_COMPILE_ERROR("fn main()->i32{n:i32 :=-2147483648/-1;return n;}", "INT_MIN");
+    EXPECT_COMPILE_ERROR("fn main()->i32{return 1;n:i32 :=1/0;}", "by zero");
+    EXPECT_COMPILE_ERROR("fn main()->i32{n:i32 :=recurse(0);return n;}fn recurse(x:i32)->i32{return recurse(x);}", "depth limit");
+    EXPECT_COMPILE_ERROR("fn main()->i32{n:i32 :=f();return n;}fn f()->i32{m:i32 :=main();return m;}", "cyclic compile-time");
+    EXPECT_COMPILE_ERROR("fn main()->i32{n:i32 :=f();return n;}fn f()->i32{x:i32 :=recurse();return 3;}fn recurse()->i32{return recurse();}", "depth limit");
+    EXPECT_COMPILE_ERROR("fn main()->i32{n:i32 :=f();return n;}fn f()->i32{x:i32=recurse();return 3;}fn recurse()->i32{return recurse();}", "depth limit");
     char large[4096] = "fn main()->i32{n:i32 :=large(1);return n;}fn large(x:i32)->i32{a:i32=x;";
     size_t used = strlen(large);
     for (size_t i = 0; i < 80; ++i) { memcpy(large + used, "a=a+1;", 6); used += 6; }
     memcpy(large + used, "return a;}", 11);
-    constant_program(large, 81);
+    expect_constant_i32(large, 81);
 }
-int main(void) { arithmetic(); names_and_types(); calls_and_inline(); compile_time_constants(); pointers(); pointer_arithmetic(); verifier(); puts("compiler tests passed"); return 0; }
+static void c_calls_and_strings(void) {
+    const char *code = "[[extern(C)]] fn puts(text:*char)->i32;"
+        "fn text()->*char{return \"A\\n\\x42\\0tail\";}"
+        "fn main()->i32{puts(text());return 0;}";
+    for (TestMode mode = TEST_O0; mode <= TEST_O1; ++mode) {
+        Compilation test = test_compile("external puts", code, mode);
+        AtriIRFunction *puts_function = test_function(&test.after, "puts");
+        CHECK(puts_function->external_c && puts_function->instruction_count == 0 && puts_function->block_count == 0);
+        CHECK(puts_function->parameter_types[0] == ATRI_IR_PTR_CHAR);
+        EXPECT_CALL(test.after, "main", "puts");
+        CHECK(test.after.program.string_count == 1);
+        const unsigned char expected[] = {'A', '\n', 'B', 0, 't', 'a', 'i', 'l', 0};
+        CHECK(test.after.program.strings[0].length == sizeof(expected)-1);
+        CHECK(memcmp(test.after.program.strings[0].bytes, expected, sizeof(expected)) == 0);
+        EXPECT_VALID_IR(test.after);
+        test_destroy(&test);
+    }
+    Compilation test = test_compile("empty C string", "fn empty()->*char{return \"\";}", TEST_O1);
+    CHECK(test.after.program.strings[0].length == 0 && test.after.program.strings[0].bytes[0] == 0);
+    test_destroy(&test);
+    test = test_compile("UTF-8 bytes", "fn text()->*char{return \"你好\";}", TEST_O1);
+    const unsigned char utf8[] = {0xe4, 0xbd, 0xa0, 0xe5, 0xa5, 0xbd, 0};
+    CHECK(test.after.program.strings[0].length == 6);
+    CHECK(memcmp(test.after.program.strings[0].bytes, utf8, sizeof(utf8)) == 0);
+    test_destroy(&test);
+    test = test_compile("arbitrary string bytes", "fn bytes()->*char{return \"\\xff\\x80\\x00\";}", TEST_O1);
+    const unsigned char bytes[] = {0xff, 0x80, 0, 0};
+    CHECK(test.after.program.strings[0].length == sizeof(bytes)-1);
+    CHECK(memcmp(test.after.program.strings[0].bytes, bytes, sizeof(bytes)) == 0);
+    test_destroy(&test);
+    test = test_compile("forward C declaration", "fn caller()->i32{return ext();}[[extern(C)]] fn ext()->i32;", TEST_O1);
+    EXPECT_CALL(test.after, "caller", "ext");
+    test_destroy(&test);
+    test = test_compile("declaration only", "[[extern(C)]] fn ext()->i32;", TEST_O1);
+    EXPECT_VALID_IR(test.after);
+    test_destroy(&test);
+    test = test_compile("character pointer arithmetic",
+        "fn move(p:*char,n:i64)->*char{return n+p;}"
+        "fn distance(p:*char,q:*char)->i64{return p-q;}"
+        "fn is_null(p:*char)->bool{return null==p;}"
+        "fn default_null()->bool{p:*char;return p==null;}", TEST_O1);
+    CHECK(test_function(&test.after, "move")->return_type == ATRI_IR_PTR_CHAR);
+    EXPECT_OPERATIONS(test.after, "distance", ATRI_IR_PTR_DIFF, 1);
+    EXPECT_RETURN_BOOL(test.after, "default_null", true);
+    test_destroy(&test);
+
+    EXPECT_COMPILE_ERROR("[[extern(C)]] fn puts(p:*char)->i32;fn f()->i32{return puts(1);}", "type mismatch");
+    EXPECT_COMPILE_ERROR("[[extern(C)]] fn puts(p:*char)->i32;fn f()->i32{return puts();}", "argument count");
+    EXPECT_COMPILE_ERROR("[[extern(C)]] fn f()->i32;[[extern(C)]] fn f()->i64;", "duplicate function");
+    EXPECT_COMPILE_ERROR("[[extern(C)]] fn f(a:i32,a:i32)->i32;", "duplicate local");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return \"text\";}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f(p:*i32)->*char{return p;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->char{return 1;}", "char values");
+    EXPECT_COMPILE_ERROR("fn f()->*char{p:*char :=\"text\";return p;}", "compile-time pointer constants");
+    EXPECT_COMPILE_ERROR("fn f(p:*char,q:*i32)->i64{return p-q;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f(p:*char)->bool{return p<null;}", "ordered comparisons");
+    EXPECT_COMPILE_ERROR("fn f()->*char{return null+1;}", "null pointer");
+    EXPECT_COMPILE_ERROR("[[extern(C)]] fn ext()->i32;fn f()->i32{n:i32 :=ext();return n;}", "cannot execute at compile time");
+    EXPECT_COMPILE_ERROR("[[extern(C)]] fn ext()->i32;fn wrapper()->i32{ext();return 1;}"
+        "fn f()->i32{n:i32 :=wrapper();return n;}", "cannot execute at compile time");
+    EXPECT_COMPILE_ERROR("[[extern(C)]] fn puts(p:*char)->i32;fn f()->i32{n:i32 :=puts(\"text\");return n;}", "cannot execute at compile time");
+}
+int main(void) {
+    arithmetic();
+    names_and_types();
+    compile_time_constants();
+    pointers();
+    pointer_arithmetic();
+    c_calls_and_strings();
+    puts("compiler tests passed");
+    return 0;
+}

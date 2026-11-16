@@ -1,0 +1,6 @@
+fn main() -> i32 {
+    return 1;
+    x: i32 = 3;
+    y: i32 = x + 2;
+    return y;
+}

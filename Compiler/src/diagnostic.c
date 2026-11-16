@@ -13,6 +13,7 @@ AtriLocation atri_source_location(AtriSource source, size_t offset) {
         cursor = 3;
         location.line_start = 3;
     }
+    /* 列数按 UTF-8 字符起始字节递增，不把续字节另算一列；不等于终端中的实际显示宽度。 */
     while (cursor < offset) {
         unsigned char c = (unsigned char)source.text[cursor++];
         if (c == '\r' || c == '\n') {

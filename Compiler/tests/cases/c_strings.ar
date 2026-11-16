@@ -1,0 +1,16 @@
+[[extern(C)]] fn puts(text: *char) -> i32;
+
+fn returned_literal() -> *char {
+    return "returned literal";
+}
+
+fn main() -> i32 {
+    puts("");
+    puts("line1\nline2");
+    puts("\"quoted\"\\tab\t\x41");
+    puts("你好");
+    puts("before\0after");
+    puts("0suffix" + 1);
+    puts(returned_literal());
+    return 0;
+}

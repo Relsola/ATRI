@@ -11,7 +11,7 @@ typedef struct {
     size_t length;
 } AtriSource;
 
-/* Half-open byte offsets into the original, caller-owned source. */
+/* 原始源码的半开字节区间 [start,end)，不复制名称或字面量；调用方必须保持源码存活。 */
 typedef struct {
     size_t start;
     size_t end;
@@ -37,11 +37,11 @@ typedef enum {
 } AtriOp;
 typedef enum {
     ATRI_EXPR_INTEGER, ATRI_EXPR_NAME, ATRI_EXPR_UNARY, ATRI_EXPR_BINARY, ATRI_EXPR_CALL,
-    ATRI_EXPR_ADDRESS, ATRI_EXPR_DEREFERENCE, ATRI_EXPR_NULL, ATRI_EXPR_BOOL
+    ATRI_EXPR_ADDRESS, ATRI_EXPR_DEREFERENCE, ATRI_EXPR_NULL, ATRI_EXPR_BOOL, ATRI_EXPR_STRING, ATRI_EXPR_FIELD, ATRI_EXPR_INITIALIZER
 } AtriExprKind;
 typedef struct {
     AtriExprKind kind;
-    AtriSpan span, text;
+    AtriSpan span, text, qualifier;
     AtriOp op;
     AtriId left, right;
     size_t first_argument, argument_count;
@@ -74,10 +74,41 @@ typedef struct {
     size_t first_parameter, parameter_count;
     size_t first_statement, statement_count;
     AtriId block;
+    bool external_c;
+    bool exported;
 } AtriFunction;
 
-/* Flat arrays and stable indices. Blocks own contiguous statement-ID edges, including nested blocks. */
+typedef struct { AtriSpan name, type; AtriId expression; } AtriField;
+typedef struct { AtriSpan name, span; size_t first_field, field_count; bool exported; } AtriStruct;
+typedef struct { AtriSpan name; AtriId expression; } AtriInitializer;
+typedef struct { AtriSpan name, path; AtriId target; } AtriImport;
+typedef struct { AtriStatement declaration; bool exported; } AtriGlobal;
+typedef struct { char *path; AtriSpan span; } AtriModule;
 typedef struct {
+    const char *text;
+    size_t length;
+    AtriId owner, target;
+    unsigned kind; /* 0 函数，1 全局，2 模块绑定，3 结构体。 */
+    bool exported;
+    AtriSpan span;
+} AtriModuleSymbol;
+
+/* 节点以稳定 ID 互相引用，扩容不使引用失效；块的语句范围指向 block_statements 边数组。 */
+typedef struct {
+    AtriStruct *structs;
+    size_t struct_count;
+    AtriField *fields;
+    size_t field_count;
+    AtriInitializer *initializers;
+    size_t initializer_count;
+    AtriModuleSymbol *symbols;
+    size_t symbol_count;
+    AtriImport *imports;
+    size_t import_count;
+    AtriGlobal *globals;
+    size_t global_count;
+    AtriModule *modules;
+    size_t module_count;
     AtriFunction *functions;
     size_t function_count;
     AtriParameter *parameters;
@@ -95,13 +126,20 @@ typedef struct {
 } AtriProgram;
 
 /*
- * Source must outlive the AST. Output must not already own allocations.
- * On failure, output is empty and diagnostic contains the first error.
- * Successful output must be released with atri_program_destroy.
- * This is syntax parsing, without symbol or type checking.
+ * source 的寿命必须覆盖 AST；output 传入时不能持有未释放的分配。
+ * 失败时 output 清空，diagnostic 保留首个错误；成功后由 atri_program_destroy 释放。
+ * 此接口仅解析语法，不检查名称与类型。
  */
 bool atri_parse(AtriSource source, AtriProgram *output,
                 AtriDiagnostic *diagnostic);
+bool atri_parse_sources(AtriSource source, const AtriModule *modules, size_t count, AtriProgram *program, AtriDiagnostic *diagnostic);
+bool atri_load_program(AtriSource input, AtriSource *source, AtriProgram *program, AtriDiagnostic *diagnostic);
+bool atri_validate_modules(AtriSource source, const AtriProgram *program, AtriDiagnostic *diagnostic);
+AtriId atri_module_at(const AtriProgram *program, size_t offset);
+AtriId atri_find_declaration(AtriSource source, const AtriProgram *program, size_t offset,
+                             AtriSpan name, AtriSpan qualifier, bool *global);
+AtriId atri_find_struct(AtriSource source, const AtriProgram *program, size_t offset, AtriSpan name, AtriSpan qualifier);
+void atri_program_diagnostic(FILE *stream, AtriSource source, const AtriProgram *program, AtriDiagnostic diagnostic);
 void atri_program_destroy(AtriProgram *program);
 void atri_dump_ast(FILE *stream, AtriSource source,
                    const AtriProgram *program);

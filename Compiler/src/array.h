@@ -6,6 +6,7 @@
 #include <string.h>
 static inline bool atri_append(void **data, size_t *count, size_t *capacity,
                                size_t width, const void *element) {
+    /* 先限制元素数，再计算分配字节数，避免追加和扩容时发生 size_t 溢出。 */
     if (*count == SIZE_MAX || *count >= SIZE_MAX / width) return false;
     if (*count == *capacity) {
         size_t next = *capacity == 0 ? 8 : *capacity;

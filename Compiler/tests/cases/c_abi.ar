@@ -1,0 +1,56 @@
+[[extern(C)]] fn c_probe(text: *char, wide: i64, tag: i32, object: *i32, tail: *char, last: i64) -> i64;
+[[extern(C)]] fn c_text() -> *char;
+[[extern(C)]] fn c_identity(text: *char) -> *char;
+[[extern(C)]] fn c_bool(value: i32) -> bool;
+[[extern(C)]] fn c_bump(object: *i32) -> i32;
+
+fn call_c(object: *i32, wide: i64, last: i64) -> i64 {
+    return c_probe("ATRI", wide, -7, object, "tail", last);
+}
+
+fn observe_c_write(object: *i32) -> i32 {
+    before: i32 = *object;
+    c_bump(object);
+    return *object - before;
+}
+
+fn from_c() -> *char {
+    return c_text();
+}
+
+fn round_trip(text: *char) -> *char {
+    return c_identity(text);
+}
+
+fn negate_c_bool(value: i32) -> bool {
+    return !c_bool(value);
+}
+
+fn static_text() -> *char {
+    return "static text";
+}
+
+fn char_offset(text: *char, offset: i64) -> *char {
+    return text + offset;
+}
+
+fn char_offset32(text: *char, offset: i32) -> *char {
+    return offset + text;
+}
+
+fn char_distance(left: *char, right: *char) -> i64 {
+    return left - right;
+}
+
+fn default_char_null() -> *char {
+    text: *char;
+    return text;
+}
+
+fn choose_text(flag: bool) -> *char {
+    text: *char;
+    if (flag) {
+        text = "chosen";
+    }
+    return text;
+}

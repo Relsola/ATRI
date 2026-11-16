@@ -15,8 +15,10 @@ static bool emit_fold(AtriIRFunction *out, AtriIRInst inst, AtriId *id, AtriDiag
         const AtriIRInst *offset = &out->instructions[inst.right];
         if (offset->kind == ATRI_IR_CONST) {
             int64_t n = offset->type == ATRI_IR_I32 ? atri_i32_signed((uint32_t)offset->immediate) : atri_i64_signed(offset->immediate);
-            if (n < INT64_MIN / 4 || n > INT64_MAX / 4)
+            int64_t stride = inst.type == ATRI_IR_PTR_CHAR ? 1 : 4;
+            if (n < INT64_MIN / stride || n > INT64_MAX / stride) {
                 return diagnostic(d, inst.span, "pointer byte offset exceeds the signed 64-bit range");
+            }
         }
     }
     if (inst.kind == ATRI_IR_UNARY || inst.kind == ATRI_IR_BINARY) {
@@ -36,10 +38,14 @@ static bool emit_fold(AtriIRFunction *out, AtriIRInst inst, AtriId *id, AtriDiag
     return atri_ir_append(out, inst, id) || diagnostic(d, inst.span, "out of memory during optimization");
 }
 static bool is_leaf(const AtriIRFunction *f) {
-    if (f->block_count > 1) return false;
+    if (f->external_c || f->block_count > 1) {
+        return false;
+    }
+    if (f->return_type >= ATRI_IR_STRUCT) { return false; }
     size_t active = 0;
     for (size_t i = 0; i < f->instruction_count; ++i) {
         AtriIRKind kind = f->instructions[i].kind;
+        if (f->instructions[i].type >= ATRI_IR_STRUCT || kind == ATRI_IR_FIELD) { return false; }
         if (kind == ATRI_IR_CALL || kind == ATRI_IR_LOCAL || kind == ATRI_IR_LOAD || kind == ATRI_IR_STORE) return false;
         if (f->instructions[i].kind != ATRI_IR_NOP) ++active;
     }
@@ -47,6 +53,7 @@ static bool is_leaf(const AtriIRFunction *f) {
 }
 static bool inline_leaf(AtriIRFunction *out, const AtriIRFunction *callee,
                         const AtriId *arguments, AtriId *value, AtriDiagnostic *d) {
+    /* 克隆时重新分配指令 ID；map 把被调函数的参数/旧值映射到调用者的实参/新值。 */
     AtriId *map = malloc(callee->instruction_count * sizeof(*map));
     if (map == NULL) return diagnostic(d, callee->name, "out of memory during inlining");
     bool ok = true;
@@ -67,6 +74,8 @@ static bool inline_leaf(AtriIRFunction *out, const AtriIRFunction *callee,
 static bool eliminate_dead(AtriIRFunction *f, AtriDiagnostic *d) {
     bool *live = calloc(f->instruction_count, sizeof(*live));
     if (live == NULL) return diagnostic(d, f->name, "out of memory during dead code elimination");
+    /* 单块中操作数总在使用前定义，因此从后向前传播依赖一次即可。
+     * call 即使结果无用也保留：尚无纯函数/终止性证明，删除它可能丢失写入或改变不终止行为。 */
     for (size_t i = f->instruction_count; i-- > 0;) {
         AtriIRInst *v = &f->instructions[i];
         if (v->kind == ATRI_IR_RETURN || v->kind == ATRI_IR_CALL || v->kind == ATRI_IR_STORE) live[i] = true;
@@ -83,17 +92,24 @@ static bool eliminate_dead(AtriIRFunction *f, AtriDiagnostic *d) {
 }
 bool atri_optimize(AtriIRProgram *p, bool inline_functions, AtriDiagnostic *d) {
     if (!atri_ir_verify(p, d)) return false;
-    /* Repeated bottom-up leaf inlining handles declaration order and preserves cycles. */
+    /* 某轮内联可能让调用者成为新的叶函数，继续迭代即可处理定义顺序任意的调用链；递归环保留。 */
     size_t passes = inline_functions ? p->function_count + 1 : 1;
     if (passes > 64) passes = 64;
     for (size_t pass = 0; pass < passes; ++pass) {
         bool changed = false;
         for (size_t n = 0; n < p->function_count; ++n) {
             AtriIRFunction *old = &p->functions[n];
-            /* CFG optimization requires path-aware analysis; retain these functions verbatim for now. */
-            if (old->block_count > 1) continue;
-            AtriIRFunction out = {.name = old->name, .parameter_count = old->parameter_count,
+            /* 上面的折叠/DCE 只适用于单块，不能跨分支套用：未执行路径中的非法运算也不能提前求值。 */
+            bool aggregate = old->return_type >= ATRI_IR_STRUCT;
+            for (size_t i = 0; i < old->instruction_count; ++i) {
+                if (old->instructions[i].type >= ATRI_IR_STRUCT || old->instructions[i].kind == ATRI_IR_FIELD) { aggregate = true; }
+            }
+            if (old->external_c || old->block_count > 1 || aggregate) {
+                continue;
+            }
+            AtriIRFunction out = {.name = old->name, .module = old->module, .parameter_count = old->parameter_count,
                 .parameter_types = old->parameter_types, .return_type = old->return_type, .block_count = 1};
+            /* 压紧 NOP 和插入内联体都会改变 ID，重建每条值引用以及调用实参索引。 */
             AtriId *map = malloc(old->instruction_count * sizeof(*map));
             if (map == NULL) return diagnostic(d, old->name, "out of memory during optimization");
             bool ok = true;

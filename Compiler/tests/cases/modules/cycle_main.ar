@@ -1,0 +1,2 @@
+a :: import "cycle_a";
+fn main() -> i32 { return a::a(4); }

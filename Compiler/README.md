@@ -2,7 +2,9 @@
 
 Compiler 是 ATRI 大型个人项目的基础子项目，也是当前建设的第一步，目标是实现一门以 DOP（面向数据编程）为核心取向、偏底层的强类型语言及可持续自举的原生编译器。
 
-首个目标平台为 Windows x86-64，使用 C23 实现 Stage 0。目前已有 i32、i64、bool 与 `*i32` 的编译链路：Lexer/Parser/AST、名称/类型检查、整数/布尔编译期常量求值、IR 与 Verifier、传播/折叠、小函数内联及 x64 汇编输出。支持整数指针取地址、显式读写、参数/返回，以及按元素缩放的加减和 i64 元素距离；已支持 if/else、while、do...while、for、loop、break/continue、比较和短路逻辑，以及常量求值中的分支/循环/递归；聚合、多模块、defer、完整 run/AST 编译期系统和浮点运算等尚未实现。
+首个目标平台为 Windows x86-64，使用 C23 实现 Stage 0。目前已有 i32、i64、bool 与 `*i32` 的编译链路：Lexer/Parser/AST、名称/类型检查、整数/布尔编译期常量求值、IR 与 Verifier、传播/折叠、小函数内联及 x64 汇编输出。支持整数指针取地址、显式读写、参数/返回，以及按元素缩放的加减和 i64 元素距离；已支持 if/else、while、do...while、for、loop、break/continue、比较和短路逻辑，以及常量求值中的分支/循环/递归；已支持相对 .ar 多模块导入、函数/标量全局导出及共享全局存储；已实现结构体定义、字段默认值/指定初始化、复制和按值传参/返回；数组/union/enum、defer、完整 run/AST 编译期系统和浮点运算等尚未实现。
+
+已增加 C 兼容 `*char`、静态零结尾字符串字面量和 `[[extern(C)]]` 固定签名外部调用，可以通过 puts 打印。稳定 ABI 目标与 C 一致，内置 string 暂缓；完整范围和限制见[外部调用子集](NEXT/parser_subset_v0_1.md#c-字符串与外部调用)。
 
 ## 运行整数编译原型
 
@@ -10,24 +12,37 @@ Compiler 是 ATRI 大型个人项目的基础子项目，也是当前建设的�
 cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ctest --test-dir build --output-on-failure
-.\build\atri-parse.exe .\examples\main.txt
-.\build\atri-cc.exe --emit-ir-before-opt .\examples\main.txt
-.\build\atri-cc.exe --emit-ir .\examples\main.txt
-.\build\atri-cc.exe -O0 --emit-ir .\examples\constants.txt
-.\build\atri-cc.exe --emit-ir .\examples\pointers.txt
-.\build\atri-cc.exe --emit-ir .\examples\pointer_arithmetic.txt
-.\build\atri-cc.exe --emit-ir .\examples\control_flow.txt
-.\build\atri-cc.exe -S -o .\build\main.s .\examples\main.txt
+.\build\atri-parse.exe .\examples\main.ar
+.\build\atri-cc.exe --emit-ir-before-opt .\examples\main.ar
+.\build\atri-cc.exe --emit-ir .\examples\main.ar
+.\build\atri-cc.exe -O0 --emit-ir .\examples\constants.ar
+.\build\atri-cc.exe --emit-ir .\examples\pointers.ar
+.\build\atri-cc.exe --emit-ir .\examples\pointer_arithmetic.ar
+.\build\atri-cc.exe --emit-ir .\examples\control_flow.ar
+.\build\atri-cc.exe -S -o .\build\main.s .\examples\main.ar
 clang .\build\main.s -o .\build\main.exe
 .\build\main.exe
 $LASTEXITCODE # 3
 ```
 
-普通变量写作 `a: i32 = 1;`，省略初始化器时默认零初始化；编译期常量写作 `n: i32 := add(1, 2);`，无法在编译期求值时必须报错。[常量示例](examples/constants.txt)在 -O0 下也直接返回 3，不依赖内联。全角分号 `；` 会报错。完整范围、暂用的 BD-06 候选规则和当前后端限制见[整数编译原型](NEXT/parser_subset_v0_1.md)。
+普通变量写作 `a: i32 = 1;`，省略初始化器时默认零初始化；编译期常量写作 `n: i32 := add(1, 2);`，无法在编译期求值时必须报错。[常量示例](examples/constants.ar)在 -O0 下也直接返回 3，不依赖内联。全角分号 `；` 会报错。完整范围、暂用的 BD-06 候选规则和当前后端限制见[整数编译原型](NEXT/parser_subset_v0_1.md)。
+
+打印示例见 [hello.ar](examples/hello.ar)：
+
+```powershell
+.\build\atri-cc.exe -S -o .\build\hello.s .\examples\hello.ar
+clang .\build\hello.s -o .\build\hello.exe
+.\build\hello.exe
+# import "basic"
+```
+
+当前使用 Clang 默认 C 启动代码及运行库完成链接；编译器本身仍输出汇编，不自动执行链接器。`-o` 只指定文本输出文件名，不能直接生成 exe；指定 `.exe`（不区分大小写）会返回命令行错误且保留已有文件，必须先输出 `.s` 再使用 Clang 汇编/链接。`build.bat` 是不随仓库提交的本地试验脚本；上面的命令可直接用于构建示例。C 声明和字面量规则见[语言规范第 5.5/13 节](NEXT/language_spec_v0_1.md#13-c-互操作与执行环境)。
 
 ## 文档
 
 - [当前进度与验证记录](NEXT/progress_v0_1.md)
+- [测试用例与预期写法](tests/README.md)
+- [开发约定：代码风格、工具与验证](docs/development.md)
 - [语言规范 v0.1](NEXT/language_spec_v0_1.md)
 - [已实现的基础编译子集](NEXT/parser_subset_v0_1.md)
 - [已实现的整数指针子集](NEXT/pointer_subset_v0_1.md)
@@ -54,8 +69,20 @@ $LASTEXITCODE # 3
 已审查确认：BD-16 的声明顺序、自然对齐、无聚合自动相等及首版布局边界接受；空结构体大小改为 0、对齐保持 1。零大小对象的地址、指针操作、分配与 FFI 配套继续审查。DOP 定位不自动增加专用 SoA/SIMD 语法或改变既有 C 布局。
 
 1. 整数环绕、cast 截断与非法运算边界（BD-06/07/25）。
-2. char 编码单元、只读字符指针及暂不内置拥有型 string（BD-04/05/13）。
+2. char 标量与只读指针接口（BD-04/05/13）；C 兼容字符指针已确认并实现，内置 string 整体暂缓。
 3. 编译期常量的聚合/地址边界、目标只读接口和按值复制（BD-10/11/12）。
 4. 原始指针的低层访问契约、数组完整类型/值语义、零大小对象配套、枚举有效零值及全局初始化限制（BD-14/15/16/17/24、ARRAY-01）；当前数组检查范围已确定，运行期检查后续探索。
 
 主规范仍为规则维护入口，审查稿用于提出未确认行为和解释取舍；接受后再合入主规范。完整核心子集范围、AST 修改调度、完整 EBNF 和目标 ABI 实现继续按决策清单推进，不因基础提案而视为已经完成。
+
+模块与全局的能力、静态初始化和路径限制见[实现子集](NEXT/parser_subset_v0_1.md#模块与全局的当前实现)。hello.ar 从 basic.ar 导入 add，并写入其共享全局 TC。尚未实现跨次编译缓存，也未测量相对 C 头文件的解析性能。
+
+结构体示例见 [struct.ar](examples/struct.ar)，包括字段默认值、复制、按值传参与返回：
+
+```cmd
+build\atri-cc.exe -S -O1 -o build\struct.s examples\struct.ar
+clang build\struct.s -o build\struct.exe
+build\struct.exe
+```
+
+成功退出码为 0。当前结构体边界及复制成本见[实现子集](NEXT/parser_subset_v0_1.md#结构体的当前实现)。

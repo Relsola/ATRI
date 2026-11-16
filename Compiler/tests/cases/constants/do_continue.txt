@@ -1,0 +1,13 @@
+fn f() -> i32 {
+    result: i32 := count_to_three();
+    return result;
+}
+
+fn count_to_three() -> i32 {
+    count: i32;
+    do {
+        count = count + 1;
+        continue;
+    } while (count < 3);
+    return count;
+}

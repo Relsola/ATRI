@@ -1,0 +1,4 @@
+﻿s :: import "./state";
+fn helper() -> i32 { return 100; }
+export fn bump_peer() -> i32 { return s::bump() + main() - 99; }
+fn main() -> i32 { return 99; }

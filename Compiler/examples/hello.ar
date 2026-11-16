@@ -1,0 +1,17 @@
+import "basic";
+basic :: import "basic";
+
+[[extern(C)]] fn puts(text: *char) -> i32;
+
+fn main() -> i32 {
+    a: i32 := 1;
+    b: i32 := 2;
+
+    basic::TC = 3;
+
+    if(add(a, b) == 6) {
+        puts("import \"basic\"");
+    }
+
+    return 0;
+}

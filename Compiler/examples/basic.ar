@@ -1,0 +1,10 @@
+// 私有
+fn add2(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+export TC: i32 = 0;
+
+export fn add(a: i32, b: i32) -> i32 {
+    return add2(a, b) + TC;
+}
