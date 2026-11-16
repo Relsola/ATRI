@@ -60,15 +60,17 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
         }
         size_t count = lexer->offset - start;
         AtriTokenKind kind = ATRI_TOKEN_IDENTIFIER;
-        if (count == 2 && memcmp(text + start, "fn", 2) == 0) {
-            kind = ATRI_TOKEN_FN;
-        } else if (count == 6 && memcmp(text + start, "return", 6) == 0) {
-            kind = ATRI_TOKEN_RETURN;
-        } else if (count == 5 && memcmp(text + start, "const", 5) == 0) {
-            kind = ATRI_TOKEN_CONST;
-        } else if (count == 3 && memcmp(text + start, "let", 3) == 0) {
-            kind = ATRI_TOKEN_LET;
-        }
+        static const struct { const char *name; AtriTokenKind kind; } keywords[] = {
+            {"fn", ATRI_TOKEN_FN}, {"return", ATRI_TOKEN_RETURN}, {"null", ATRI_TOKEN_NULL},
+            {"true", ATRI_TOKEN_TRUE}, {"false", ATRI_TOKEN_FALSE},
+            {"if", ATRI_TOKEN_IF}, {"else", ATRI_TOKEN_ELSE}, {"while", ATRI_TOKEN_WHILE},
+            {"do", ATRI_TOKEN_DO}, {"for", ATRI_TOKEN_FOR}, {"loop", ATRI_TOKEN_LOOP},
+            {"break", ATRI_TOKEN_BREAK}, {"continue", ATRI_TOKEN_CONTINUE}
+        };
+        for (size_t i = 0; i < sizeof(keywords) / sizeof(*keywords); ++i)
+            if (count == strlen(keywords[i].name) && memcmp(text + start, keywords[i].name, count) == 0) {
+                kind = keywords[i].kind; break;
+            }
         return token(kind, start, lexer->offset);
     }
 
@@ -96,13 +98,43 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
         case '{': return token(ATRI_TOKEN_LEFT_BRACE, start, lexer->offset);
         case '}': return token(ATRI_TOKEN_RIGHT_BRACE, start, lexer->offset);
         case ';': return token(ATRI_TOKEN_SEMICOLON, start, lexer->offset);
-        case ':': return token(ATRI_TOKEN_COLON, start, lexer->offset);
+        case ':':
+            if (lexer->offset < length && text[lexer->offset] == '=') {
+                ++lexer->offset;
+                return token(ATRI_TOKEN_CONSTANT_INIT, start, lexer->offset);
+            }
+            return token(ATRI_TOKEN_COLON, start, lexer->offset);
         case ',': return token(ATRI_TOKEN_COMMA, start, lexer->offset);
-        case '=': return token(ATRI_TOKEN_EQUAL, start, lexer->offset);
+        case '=':
+            if (lexer->offset < length && text[lexer->offset] == '=') {
+                ++lexer->offset; return token(ATRI_TOKEN_EQ, start, lexer->offset);
+            }
+            return token(ATRI_TOKEN_EQUAL, start, lexer->offset);
+        case '!':
+            if (lexer->offset < length && text[lexer->offset] == '=') {
+                ++lexer->offset; return token(ATRI_TOKEN_NE, start, lexer->offset);
+            }
+            return token(ATRI_TOKEN_NOT, start, lexer->offset);
+        case '<': case '>': {
+            bool equal = lexer->offset < length && text[lexer->offset] == '=';
+            if (equal) ++lexer->offset;
+            return token(c == '<' ? (equal ? ATRI_TOKEN_LE : ATRI_TOKEN_LT) :
+                                   (equal ? ATRI_TOKEN_GE : ATRI_TOKEN_GT), start, lexer->offset);
+        }
         case '+': return token(ATRI_TOKEN_PLUS, start, lexer->offset);
         case '*': return token(ATRI_TOKEN_STAR, start, lexer->offset);
         case '/': return token(ATRI_TOKEN_SLASH, start, lexer->offset);
         case '%': return token(ATRI_TOKEN_PERCENT, start, lexer->offset);
+        case '&':
+            if (lexer->offset < length && text[lexer->offset] == '&') {
+                ++lexer->offset; return token(ATRI_TOKEN_AND, start, lexer->offset);
+            }
+            return token(ATRI_TOKEN_AMPERSAND, start, lexer->offset);
+        case '|':
+            if (lexer->offset < length && text[lexer->offset] == '|') {
+                ++lexer->offset; return token(ATRI_TOKEN_OR, start, lexer->offset);
+            }
+            break;
         case '-':
             if (lexer->offset < length && text[lexer->offset] == '>') {
                 ++lexer->offset;

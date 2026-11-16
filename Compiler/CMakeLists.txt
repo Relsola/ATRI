@@ -7,10 +7,12 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 add_library(atri_frontend STATIC
     src/lexer.c
+    src/ir_verify.c
     src/parser.c
     src/diagnostic.c
     src/ir.c
     src/lower.c
+    src/consteval.c
     src/optimize.c
     src/backend_x64.c
 )
@@ -34,6 +36,9 @@ if(BUILD_TESTING)
     add_executable(compiler-tests tests/compiler_tests.c)
     target_link_libraries(compiler-tests PRIVATE atri_frontend)
     add_test(NAME compiler COMMAND compiler-tests)
+    add_executable(control-flow-tests tests/control_flow_tests.c)
+    target_link_libraries(control-flow-tests PRIVATE atri_frontend)
+    add_test(NAME control-flow COMMAND control-flow-tests)
     add_test(NAME parse-example
         COMMAND atri-parse "${CMAKE_CURRENT_SOURCE_DIR}/examples/main.txt")
     set_tests_properties(parse-example PROPERTIES
@@ -41,7 +46,7 @@ if(BUILD_TESTING)
     if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
         find_program(ATRI_TEST_CLANG NAMES clang)
         if(ATRI_TEST_CLANG)
-            add_test(NAME native-integers COMMAND "${CMAKE_COMMAND}"
+            add_test(NAME native-execution COMMAND "${CMAKE_COMMAND}"
                 "-DCOMPILER=$<TARGET_FILE:atri-cc>"
                 "-DCLANG=${ATRI_TEST_CLANG}"
                 "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
@@ -53,7 +58,7 @@ endif()
 
 set(atri_targets atri_frontend atri-parse atri-cc)
 if(BUILD_TESTING)
-    list(APPEND atri_targets frontend-tests compiler-tests)
+    list(APPEND atri_targets frontend-tests compiler-tests control-flow-tests)
 endif()
 foreach(atri_target IN LISTS atri_targets)
     if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")

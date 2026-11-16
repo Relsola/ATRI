@@ -16,12 +16,12 @@ static AtriDiagnostic reject(AtriSource s, const char *message) {
     atri_program_destroy(&p); return d;
 }
 static void ast_and_precedence(void) {
-    AtriSource s = source("fn main()->i32{const a:i32=1;return add(a,2*3-4);}\nfn add(a:i32,b:i32)->i32{return a+b;}");
+    AtriSource s = source("fn main()->i32{a: i32 :=1;return add(a,2*3-4);}\nfn add(a:i32,b:i32)->i32{return a+b;}");
     AtriProgram p; AtriDiagnostic d;
     CHECK(atri_parse(s, &p, &d)); CHECK(p.function_count == 2 && p.parameter_count == 2);
     CHECK(p.functions[0].statement_count == 2 && p.functions[1].first_statement == 2);
     CHECK(text(s, p.parameters[0].name, "a") && text(s, p.parameters[1].type, "i32"));
-    CHECK(p.statements[0].kind == ATRI_STMT_CONST && text(s, p.statements[0].name, "a"));
+    CHECK(p.statements[0].kind == ATRI_STMT_CONSTANT && text(s, p.statements[0].name, "a"));
     const AtriExpr *call = &p.expressions[p.statements[1].expression];
     CHECK(call->kind == ATRI_EXPR_CALL && call->argument_count == 2 && text(s, call->text, "add"));
     const AtriExpr *sub = &p.expressions[p.arguments[call->first_argument + 1]];
@@ -55,10 +55,10 @@ static void lexical_and_locations(void) {
     loc = atri_source_location(s, d.span.start); CHECK(loc.line == 2 && loc.column == 9);
     const char nul[] = "fn main()->i32{return 0;}\0fn bad()->i32{}";
     reject((AtriSource){"nul.txt", nul, sizeof(nul) - 1}, "NUL byte");
-    AtriLexer lexer = atri_lexer_create(source("fn fnmain return return0 const constant let letter : , + - * / % ->"));
+    AtriLexer lexer = atri_lexer_create(source("fn fnmain return return0 const constant let letter : := , + - * / % ->"));
     AtriTokenKind kinds[] = {ATRI_TOKEN_FN, ATRI_TOKEN_IDENTIFIER, ATRI_TOKEN_RETURN, ATRI_TOKEN_IDENTIFIER,
-        ATRI_TOKEN_CONST, ATRI_TOKEN_IDENTIFIER, ATRI_TOKEN_LET, ATRI_TOKEN_IDENTIFIER,
-        ATRI_TOKEN_COLON, ATRI_TOKEN_COMMA, ATRI_TOKEN_PLUS, ATRI_TOKEN_MINUS,
+        ATRI_TOKEN_IDENTIFIER, ATRI_TOKEN_IDENTIFIER, ATRI_TOKEN_IDENTIFIER, ATRI_TOKEN_IDENTIFIER,
+        ATRI_TOKEN_COLON, ATRI_TOKEN_CONSTANT_INIT, ATRI_TOKEN_COMMA, ATRI_TOKEN_PLUS, ATRI_TOKEN_MINUS,
         ATRI_TOKEN_STAR, ATRI_TOKEN_SLASH, ATRI_TOKEN_PERCENT, ATRI_TOKEN_ARROW, ATRI_TOKEN_EOF};
     size_t previous = 0;
     for (size_t i = 0; i < sizeof(kinds) / sizeof(*kinds); ++i) {
@@ -66,11 +66,36 @@ static void lexical_and_locations(void) {
         CHECK(t.span.start >= previous); previous = t.span.end;
     }
 }
+static void pointer_ast(void) {
+    AtriSource s = source("fn f(p:* i32)->*i32{a:i32=1;q:*i32=&a;(*q)=-*p;x:i32=*p*2;return &*p;}");
+    AtriProgram p; AtriDiagnostic d;
+    CHECK(atri_parse(s, &p, &d));
+    CHECK(text(s, p.parameters[0].type, "* i32") && text(s, p.functions[0].return_type, "*i32"));
+    CHECK(p.expressions[p.statements[1].expression].kind == ATRI_EXPR_ADDRESS);
+    CHECK(p.expressions[p.statements[2].target].kind == ATRI_EXPR_DEREFERENCE);
+    const AtriExpr *neg = &p.expressions[p.statements[2].expression];
+    CHECK(neg->kind == ATRI_EXPR_UNARY && p.expressions[neg->left].kind == ATRI_EXPR_DEREFERENCE);
+    const AtriExpr *mul = &p.expressions[p.statements[3].expression];
+    CHECK(mul->kind == ATRI_EXPR_BINARY && mul->op == ATRI_MUL && p.expressions[mul->left].kind == ATRI_EXPR_DEREFERENCE);
+    const AtriExpr *address = &p.expressions[p.statements[4].expression];
+    CHECK(address->kind == ATRI_EXPR_ADDRESS && p.expressions[address->left].kind == ATRI_EXPR_DEREFERENCE);
+    atri_program_destroy(&p);
+    AtriLexer lexer = atri_lexer_create(source("& null nullable"));
+    CHECK(atri_lexer_next(&lexer, &d).kind == ATRI_TOKEN_AMPERSAND);
+    CHECK(atri_lexer_next(&lexer, &d).kind == ATRI_TOKEN_NULL);
+    CHECK(atri_lexer_next(&lexer, &d).kind == ATRI_TOKEN_IDENTIFIER);
+    reject(source("fn f()->i32{p:*=null;return 0;}"), "type name");
+    reject(source("fn f()->i32{return &;}"), "integer expression");
+}
 static void errors_and_growth(void) {
     struct { const char *input, *message; } cases[] = {
         {"fn i32 main(){}", "expected '('"}, {"fn f(i32 a)->i32{}", "expected ':'"},
-        {"fn f(a:i32,)->i32{}", "parameter name"}, {"fn f()->i32{const i32 a=0;}", "expected ':'"},
-        {"fn f()->i32{const a:i32;}", "requires an initializer"}, {"fn f()->i32{return;}", "integer expression"},
+        {"fn f(a:i32,)->i32{}", "parameter name"}, {"fn f()->i32{const a:i32=0;}", "expected ':'"},
+        {"fn f()->i32{let a:i32;}", "expected ':'"}, {"fn f()->i32{return;}", "integer expression"},
+        {"fn f()->i32{a:i32 :=;return 0;}", "integer expression"},
+        {"fn f()->i32{a::1;return 0;}", "type inference"},
+        {"fn f()->i32{a:i32:1;return 0;}", "expected ':='"},
+        {"fn f()->i32{a:i32: =1;return 0;}", "expected ':='"},
         {"fn f()->i32{return 1+;}", "integer expression"}, {"fn f()->i32{return g(1,);}", "integer expression"},
         {"fn f()->i32{return (1+2;}", "expected ')'"}, {"fn f()->i32{return 0}", "expected ';'"},
         {"fn f()->i32{return 1_000;}", "only decimal"}, {"fn f()->i32{return 0x10;}", "only decimal"},
@@ -94,6 +119,6 @@ static void errors_and_growth(void) {
     memcpy(deep + used, ";}", 3); reject(source(deep), "limit of 256");
 }
 int main(void) {
-    ast_and_precedence(); lexical_and_locations(); errors_and_growth();
+    ast_and_precedence(); lexical_and_locations(); pointer_ast(); errors_and_growth();
     puts("frontend tests passed"); return 0;
 }

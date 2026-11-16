@@ -2,7 +2,7 @@
 
 Compiler 是 ATRI 大型个人项目的基础子项目，也是当前建设的第一步，目标是实现一门以 DOP（面向数据编程）为核心取向、偏底层的强类型语言及可持续自举的原生编译器。
 
-首个目标平台为 Windows x86-64，使用 C23 实现 Stage 0。目前已有 i32 整数编译链路：Lexer/Parser/AST、名称/类型检查、IR 与 Verifier、常量传播/折叠、小函数内联及 x64 汇编输出。控制流、聚合、多模块、编译期执行和浮点运算等尚未实现。
+首个目标平台为 Windows x86-64，使用 C23 实现 Stage 0。目前已有 i32、i64、bool 与 `*i32` 的编译链路：Lexer/Parser/AST、名称/类型检查、整数/布尔编译期常量求值、IR 与 Verifier、传播/折叠、小函数内联及 x64 汇编输出。支持整数指针取地址、显式读写、参数/返回，以及按元素缩放的加减和 i64 元素距离；已支持 if/else、while、do...while、for、loop、break/continue、比较和短路逻辑，以及常量求值中的分支/循环/递归；聚合、多模块、defer、完整 run/AST 编译期系统和浮点运算等尚未实现。
 
 ## 运行整数编译原型
 
@@ -13,19 +13,24 @@ ctest --test-dir build --output-on-failure
 .\build\atri-parse.exe .\examples\main.txt
 .\build\atri-cc.exe --emit-ir-before-opt .\examples\main.txt
 .\build\atri-cc.exe --emit-ir .\examples\main.txt
+.\build\atri-cc.exe -O0 --emit-ir .\examples\constants.txt
+.\build\atri-cc.exe --emit-ir .\examples\pointers.txt
+.\build\atri-cc.exe --emit-ir .\examples\pointer_arithmetic.txt
+.\build\atri-cc.exe --emit-ir .\examples\control_flow.txt
 .\build\atri-cc.exe -S -o .\build\main.s .\examples\main.txt
 clang .\build\main.s -o .\build\main.exe
 .\build\main.exe
 $LASTEXITCODE # 3
 ```
 
-示例使用 `const a: i32 = 1` 和 `add(a, b)`，add 可定义在 main 之后。默认优化后 main 直接返回 3，无运行期加法或函数调用。`const` 仍允许运行期初始化；内联不由 const 强制保证。全角分号 `；` 会报错。完整范围、暂用的 BD-06 候选规则和当前后端限制见[整数编译原型](NEXT/parser_subset_v0_1.md)。
+普通变量写作 `a: i32 = 1;`，省略初始化器时默认零初始化；编译期常量写作 `n: i32 := add(1, 2);`，无法在编译期求值时必须报错。[常量示例](examples/constants.txt)在 -O0 下也直接返回 3，不依赖内联。全角分号 `；` 会报错。完整范围、暂用的 BD-06 候选规则和当前后端限制见[整数编译原型](NEXT/parser_subset_v0_1.md)。
 
 ## 文档
 
 - [当前进度与验证记录](NEXT/progress_v0_1.md)
 - [语言规范 v0.1](NEXT/language_spec_v0_1.md)
-- [已实现的整数编译子集](NEXT/parser_subset_v0_1.md)
+- [已实现的基础编译子集](NEXT/parser_subset_v0_1.md)
+- [已实现的整数指针子集](NEXT/pointer_subset_v0_1.md)
 - [IR 内部设计](NEXT/ir_design_v0_1.md)
 - [基础默认行为与设计取舍：审查稿 v0.1](NEXT/language_defaults_review_v0_1.md)：30 项默认提案、各项理由、重大替代方案、行为预期及零开销边界。
 - [编译器架构与自举路线](NEXT/self_hosting_compiler_design_v0_1.md)
@@ -50,7 +55,7 @@ $LASTEXITCODE # 3
 
 1. 整数环绕、cast 截断与非法运算边界（BD-06/07/25）。
 2. char 编码单元、只读字符指针及暂不内置拥有型 string（BD-04/05/13）。
-3. 对象 const、只读目标和按值复制（BD-10/11/12）。
+3. 编译期常量的聚合/地址边界、目标只读接口和按值复制（BD-10/11/12）。
 4. 原始指针的低层访问契约、数组完整类型/值语义、零大小对象配套、枚举有效零值及全局初始化限制（BD-14/15/16/17/24、ARRAY-01）；当前数组检查范围已确定，运行期检查后续探索。
 
 主规范仍为规则维护入口，审查稿用于提出未确认行为和解释取舍；接受后再合入主规范。完整核心子集范围、AST 修改调度、完整 EBNF 和目标 ABI 实现继续按决策清单推进，不因基础提案而视为已经完成。

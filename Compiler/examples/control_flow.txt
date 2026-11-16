@@ -1,0 +1,37 @@
+fn main() -> i32 {
+    total: i32;
+    for (i: i32 = 0; i < 5; i = i + 1) {
+        if (i == 2) {
+            continue;
+        }
+        total = total + i;
+    }
+
+    n: i32 = 0;
+    do {
+        n = n + 1;
+    } while (n < 2);
+
+    while (n < 4) {
+        n = n + 1;
+    }
+    loop {
+        if (total == 8 && n == 4) {
+            break;
+        } else {
+            return 1;
+        }
+    }
+    answer: i32 := factorial(5);
+    if (answer == 120) {
+        return 3;
+    }
+    return 2;
+}
+
+fn factorial(n: i32) -> i32 {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}

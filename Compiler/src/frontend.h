@@ -31,9 +31,13 @@ typedef struct {
 
 typedef size_t AtriId;
 #define ATRI_NONE ((AtriId)-1)
-typedef enum { ATRI_ADD, ATRI_SUB, ATRI_MUL, ATRI_DIV, ATRI_REM, ATRI_NEG } AtriOp;
 typedef enum {
-    ATRI_EXPR_INTEGER, ATRI_EXPR_NAME, ATRI_EXPR_UNARY, ATRI_EXPR_BINARY, ATRI_EXPR_CALL
+    ATRI_ADD, ATRI_SUB, ATRI_MUL, ATRI_DIV, ATRI_REM, ATRI_NEG,
+    ATRI_EQ, ATRI_NE, ATRI_LT, ATRI_LE, ATRI_GT, ATRI_GE, ATRI_AND, ATRI_OR, ATRI_NOT
+} AtriOp;
+typedef enum {
+    ATRI_EXPR_INTEGER, ATRI_EXPR_NAME, ATRI_EXPR_UNARY, ATRI_EXPR_BINARY, ATRI_EXPR_CALL,
+    ATRI_EXPR_ADDRESS, ATRI_EXPR_DEREFERENCE, ATRI_EXPR_NULL, ATRI_EXPR_BOOL
 } AtriExprKind;
 typedef struct {
     AtriExprKind kind;
@@ -42,15 +46,24 @@ typedef struct {
     AtriId left, right;
     size_t first_argument, argument_count;
     size_t tree_depth;
+    bool boolean;
 } AtriExpr;
 typedef enum {
-    ATRI_STMT_CONST, ATRI_STMT_LET, ATRI_STMT_ASSIGN, ATRI_STMT_RETURN
+    ATRI_STMT_CONSTANT, ATRI_STMT_VARIABLE, ATRI_STMT_ASSIGN, ATRI_STMT_RETURN,
+    ATRI_STMT_BLOCK, ATRI_STMT_IF, ATRI_STMT_WHILE, ATRI_STMT_DO,
+    ATRI_STMT_FOR, ATRI_STMT_LOOP, ATRI_STMT_BREAK, ATRI_STMT_CONTINUE, ATRI_STMT_EXPR
 } AtriStmtKind;
 typedef struct {
     AtriStmtKind kind;
     AtriSpan span, name, type;
     AtriId expression;
+    AtriId target;
+    AtriId body, otherwise, initializer, step;
 } AtriStatement;
+typedef struct {
+    AtriSpan span;
+    size_t first_statement, statement_count;
+} AtriBlock;
 typedef struct { AtriSpan name, type; } AtriParameter;
 
 typedef struct {
@@ -60,9 +73,10 @@ typedef struct {
     AtriSpan body;
     size_t first_parameter, parameter_count;
     size_t first_statement, statement_count;
+    AtriId block;
 } AtriFunction;
 
-/* Flat arrays and stable indices; each function owns parameter/statement ranges. */
+/* Flat arrays and stable indices. Blocks own contiguous statement-ID edges, including nested blocks. */
 typedef struct {
     AtriFunction *functions;
     size_t function_count;
@@ -74,6 +88,10 @@ typedef struct {
     size_t expression_count;
     AtriId *arguments;
     size_t argument_count;
+    AtriBlock *blocks;
+    size_t block_count;
+    AtriId *block_statements;
+    size_t block_statement_count;
 } AtriProgram;
 
 /*

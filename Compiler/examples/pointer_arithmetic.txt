@@ -1,0 +1,8 @@
+fn main() -> i32 {
+    a: i32 = 3;
+    p: *i32 = &a;
+    end: *i32 = p + 1;
+    distance: i64 = end - p;
+    back: *i32 = end - 1;
+    return *back;
+}

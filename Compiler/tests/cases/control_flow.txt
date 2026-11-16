@@ -1,0 +1,128 @@
+fn choose(x: i32) -> i32 {
+    if (x < 0) { return -1; }
+    else if (x == 0) { return 0; }
+    else { return 1; }
+}
+fn while_sum(n: i32) -> i32 {
+    i: i32; sum: i32;
+    while (i < n) {
+        i = i + 1;
+        if (i > 9) { break; }
+        if (i % 2 == 0) { continue; }
+        sum = sum + i;
+    }
+    return sum;
+}
+fn for_sum(n: i32) -> i32 {
+    sum: i32;
+    for (i: i32 = 0; i < n; i = i + 1) {
+        if (i == 2) { continue; }
+        sum = sum + i;
+    }
+    return sum;
+}
+fn do_count(n: i32) -> i32 {
+    i: i32;
+    do {
+        i = i + 1;
+        continue;
+    } while (i < n);
+    return i;
+}
+fn nested_break(n: i32) -> i32 {
+    sum: i32;
+    for (i: i32; i < n; i = i + 1) {
+        j: i32;
+        loop {
+            j = j + 1;
+            if (j == 2) { break; }
+            sum = sum + 1;
+        }
+    }
+    return sum;
+}
+fn endless_counter(n: i32) -> i32 {
+    i: i32;
+    for (;;) {
+        i = i + 1;
+        if (i >= n) { return i; }
+    }
+}
+fn loop_counter(n: i32) -> i32 {
+    i: i32;
+    loop {
+        i = i + 1;
+        if (i < n) { continue; }
+        break;
+    }
+    return i;
+}
+fn factorial(n: i32) -> i32 {
+    if (n <= 1) { return 1; }
+    return n * factorial(n - 1);
+}
+fn sum_pointer(start: *i32, end: *i32) -> i32 {
+    p: *i32 = start; sum: i32;
+    while (p != end) {
+        sum = sum + *p;
+        p = p + 1;
+    }
+    return sum;
+}
+fn is_null(p: *i32) -> bool { return p == null; }
+fn bools(a: bool, b: bool, c: bool, d: bool, e: bool, f: bool) -> bool {
+    return a && !b && c && !d && e && f;
+}
+fn touch(p: *i32) -> bool { *p = *p + 1; return true; }
+fn short_circuit() -> i32 {
+    count: i32;
+    a: bool = false && touch(&count);
+    b: bool = true || touch(&count);
+    c: bool = true && touch(&count);
+    d: bool = false || touch(&count);
+    if (!a && b && c && d) { return count; }
+    return -1;
+}
+fn scoped() -> i32 {
+    x: i32 = 2;
+    { x: i32 = 7; x = x + 1; }
+    for (i: i32; i < 3; i = i + 1) {
+        x = x + i;
+    }
+    return x;
+}
+fn wide_loop(n: i64) -> i64 {
+    i: i64; sum: i64;
+    while (i < n) {
+        sum = sum + 5000000000;
+        i = i + 1;
+    }
+    return sum;
+}
+fn computed() -> i32 {
+    a: i32 := for_sum(5);
+    b: i32 := while_sum(20);
+    c: i32 := do_count(0);
+    d: i32 := nested_break(3);
+    e: i32 := endless_counter(3);
+    f: i32 := loop_counter(3);
+    g: i32 := factorial(5);
+    return a + b + c + d + e + f + g;
+}
+fn safe_divide(x: i32) -> bool { return x != 0 && 10 / x > 1; }
+fn bool_loop(n: i32) -> bool {
+    i: i32; ready: bool;
+    while (!ready) {
+        i = i + 1;
+        ready = i >= n;
+    }
+    return ready;
+}
+fn compare_wide(a: i64, b: i64) -> bool { return a < b; }
+fn null_guard(p: *i32) -> bool { return p != null && *p > 0; }
+fn bind_before_branch(x: i32) -> i32 {
+    a: i32 = x; p: *i32 = &a;
+    if (x < 0) { *p = 5; } else { a = 7; }
+    return a;
+}
+fn call_bools() -> bool { return bools(true, false, true, false, true, true); }

@@ -3,8 +3,8 @@ fn sum6(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32) -> i32 {
 }
 
 fn divrem(x: i32, y: i32) -> i32 {
-    const q: i32 = x / y;
-    const r: i32 = x % y;
+    q: i32 = x / y;
+    r: i32 = x % y;
     return q * 10 + r;
 }
 
@@ -13,10 +13,10 @@ fn wrap(x: i32, y: i32) -> i32 {
 }
 
 fn bindings(x: i32) -> i32 {
-    let a: i32;
+    a: i32;
     a = x;
     a = a * 3;
-    const b: i32 = a + 1;
+    b: i32 = a + 1;
     a = 7;
     return b + a;
 }

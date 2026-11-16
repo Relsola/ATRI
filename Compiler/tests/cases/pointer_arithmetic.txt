@@ -1,0 +1,62 @@
+fn add32(p: *i32, n: i32) -> *i32 {
+    return p + n;
+}
+fn reverse_add32(n: i32, p: *i32) -> *i32 {
+    return n + p;
+}
+fn subtract32(p: *i32, n: i32) -> *i32 {
+    return p - n;
+}
+fn add64(p: *i32, n: i64) -> *i32 {
+    return p + n;
+}
+fn subtract64(p: *i32, n: i64) -> *i32 {
+    return p - n;
+}
+fn distance(p: *i32, q: *i32) -> i64 {
+    return p - q;
+}
+fn read_offset(p: *i32, n: i32) -> i32 {
+    return *(p + n);
+}
+fn write_offset(p: *i32, n: i32, value: i32) -> i32 {
+    *(p + n) = value;
+    return *(p + n);
+}
+fn roundtrip(p: *i32, n: i64) -> *i32 {
+    return (p + n) - n;
+}
+fn count(p: *i32, n: i64) -> i64 {
+    return (p + n) - p;
+}
+fn inline_offset(p: *i32, n: i32) -> *i32 {
+    return add32(p, n);
+}
+fn evaluation_order(p: *i32) -> *i32 {
+    return left(p) + right(p);
+}
+fn left(p: *i32) -> i32 {
+    *p = 2;
+    return 0;
+}
+fn right(p: *i32) -> *i32 {
+    *p = *p + 3;
+    return p;
+}
+fn wide_arithmetic(x: i64, y: i64) -> i64 {
+    a: i64 = x * 3 + y;
+    return -a / 2 + x % y;
+}
+fn mixed_stack(a: i64, b: i32, c: *i32, d: i64, e: i64, f: *i32) -> i64 {
+    return a + d + e + (f - c);
+}
+fn constant64() -> i64 {
+    n: i64 := helper64(5000000000);
+    return n;
+}
+fn wrap64(x: i64) -> i64 {
+    return x + 1;
+}
+fn helper64(x: i64) -> i64 {
+    return x * 2 + 1;
+}

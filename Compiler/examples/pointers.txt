@@ -1,0 +1,6 @@
+fn main() -> i32 {
+    a: i32 = 1;
+    p: *i32 = &a;
+    *p = *p + 2;
+    return a;
+}

@@ -1,0 +1,67 @@
+fn write(p: *i32, value: i32) -> i32 {
+    *p = value;
+    return *p;
+}
+
+fn aliases(p: *i32, q: *i32) -> i32 {
+    *p = 5;
+    *q = *q + 2;
+    return *p;
+}
+
+fn identity(p: *i32) -> *i32 {
+    return p;
+}
+
+fn local_roundtrip(x: i32) -> i32 {
+    a: i32 = x;
+    p: *i32 = &a;
+    before: i32 = a;
+    *p = before + 1;
+    a = a + 2;
+    return *p;
+}
+
+fn mixed(a: i32, p: *i32, b: i32, q: *i32, r: *i32, c: i32) -> i32 {
+    *p = a;
+    *q = b;
+    *r = c;
+    return *p + *q + *r;
+}
+
+fn through_call(p: *i32) -> i32 {
+    old: i32 = *p;
+    updated: i32 = write(p, old + 4);
+    return *p + updated;
+}
+
+fn return_alias(p: *i32) -> *i32 {
+    return identity(p);
+}
+
+fn returned_pointer_write(p: *i32) -> i32 {
+    q: *i32 = return_alias(p);
+    *q = 17;
+    return *p;
+}
+
+fn null_pointer() -> *i32 {
+    p: *i32;
+    return p;
+}
+
+fn address_of_dereference(p: *i32) -> *i32 {
+    return &*p;
+}
+
+fn unused_call_result(p: *i32) -> i32 {
+    ignored: i32 = write(p, 23);
+    return 0;
+}
+
+fn reassign_pointer(p: *i32, q: *i32) -> i32 {
+    selected: *i32 = p;
+    selected = q;
+    *selected = 11;
+    return *p;
+}
