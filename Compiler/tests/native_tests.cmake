@@ -92,6 +92,11 @@ endforeach()
 
 # 每项只列源码和期望返回值；两种等级分别编译执行，验证优化效果时仍需保留行为检查。
 foreach(level O0 O1)
+    run_program("tests/cases/arrays_run.ar" 0)
+    run_program("examples/run_constants.ar" 2)
+    expect_direct_return("${OUTPUT_DIR}/run_constants-${level}.s" 2)
+    expect_function_count("${OUTPUT_DIR}/run_constants-${level}.s" 1)
+    run_library("tests/cases/array_abi.ar" "array_harness.c")
     run_program("tests/cases/modules/module_main.ar" 0)
     run_program("tests/cases/modules/cycle_main.ar" 7)
     run_program("examples/struct.ar" 0)

@@ -1,0 +1,71 @@
+N: i32 := 3;
+counter: i32;
+
+struct Item { value: i32 = 7; }
+struct Buffer { data: [N]u8; flag: bool; }
+struct Empty {}
+
+fn next() -> i32 {
+    counter = counter + 1;
+    return counter;
+}
+
+fn make() -> [N]i32 { return {1, 2, 3}; }
+fn sum(data: [3]i32) -> i32 {
+    result: i32;
+    for (i: i32 = 0; i < 3; i = i + 1) {
+        result = result + data[i];
+    }
+    return result;
+}
+fn edit(p: *[3]i32) -> i32 {
+    (*p)[1] = 9;
+    return (*p)[1];
+}
+fn max(a: i32, b: i32) -> i32 { return a > b ? a : b; }
+fn byte_arg(a: u8, b: u8, c: u8, d: u8, e: u8) -> u8 { return e; }
+fn bytes() -> bool {
+    b: Buffer = {.data = {1, 200}};
+    p: *u8 = &b.data[1];
+    *p = *p + 55;
+    if (b.data[0] != 1 || b.data[1] != 255 || b.data[2] != 0 || b.flag) { return false; }
+    if (p - &b.data[0] != 1) { return false; }
+    p = p - 1;
+    *p = 250;
+    if (b.data[0] + 10 != 4 || -b.data[0] != 6 || b.data[0] / 2 != 125 || b.data[0] % 7 != 5) { return false; }
+    return byte_arg(0, 1, 2, 3, 255) > 200;
+}
+fn nested() -> bool {
+    grid: [2][2]i32 = {{1, 2}, {3, 4}};
+    indices: [2]i32 = {1, 0};
+    grid[indices[0]][indices[1]] = 8;
+    items: [2]Item = {{.value = 11}};
+    items[1].value = items[1].value + 1;
+    empty: [3]Empty;
+    empty[1] = empty[0];
+    return grid[1][0] == 8 && grid[0][1] == 2 && items[0].value == 11 && items[1].value == 8;
+}
+fn main() -> i32 {
+    count: i32 := 3;
+    data: [(count + 0)]i32 = make();
+    copy: [3]i32 = data;
+    data[0] = 8;
+    if (sum(copy) != 6 || sum(data) != 13 || make()[2] != 3) { return 1; }
+    if (edit(&data) != 9 || data[1] != 9 || copy[1] != 2) { return 2; }
+    ordered: [3]i32 = {next(), next()};
+    if (ordered[0] != 1 || ordered[1] != 2 || ordered[2] != 0 || counter != 2) { return 3; }
+    if (!bytes() || !nested()) { return 4; }
+    run a: i32 := max(1, 2);
+    b: i32 = run max(8, 3);
+    c: i32 := true ? 6 : 1 / 0;
+    if (a != 2 || b != 8 || c != 6) { return 5; }
+    // 未选中的分支不得调用 next；运行期与编译期均按所选路径求值。
+    selected: i32 = false ? next() : max(7, 4);
+    if (selected != 7 || counter != 2) { return 6; }
+    {
+        count: u8 := 255;
+        wrapped: [count + 2]i32 = {9};
+        if (wrapped[0] != 9) { return 7; }
+    }
+    return 0;
+}

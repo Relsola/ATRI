@@ -9,8 +9,8 @@ int64_t atri_i64_signed(uint64_t bits) {
     /* 超过 INT64_MAX 的 uint64_t 不直接强转；从可表示的补数恢复负值，覆盖 INT64_MIN。 */
     return bits <= INT64_MAX ? (int64_t)bits : -1 - (int64_t)(UINT64_MAX - bits);
 }
-bool atri_ir_is_integer(AtriIRType type) { return type == ATRI_IR_I32 || type == ATRI_IR_I64; }
-bool atri_ir_is_pointer(AtriIRType type) { return type == ATRI_IR_PTR_I32 || type == ATRI_IR_PTR_CHAR || type >= ATRI_IR_PTR_STRUCT; }
+bool atri_ir_is_integer(AtriIRType type) { return type == ATRI_IR_I32 || type == ATRI_IR_I64 || type == ATRI_IR_U8; }
+bool atri_ir_is_pointer(AtriIRType type) { return type == ATRI_IR_PTR_I32 || type == ATRI_IR_PTR_CHAR || type == ATRI_IR_PTR_U8 || type >= ATRI_IR_PTR_STRUCT; }
 bool atri_ir_has_value(AtriIRKind kind) {
     return kind == ATRI_IR_PARAM || kind == ATRI_IR_CONST || kind == ATRI_IR_UNARY ||
         kind == ATRI_IR_BINARY || kind == ATRI_IR_CALL || kind == ATRI_IR_LOAD ||
@@ -19,13 +19,14 @@ bool atri_ir_has_value(AtriIRKind kind) {
 bool atri_compare(AtriIRType type, AtriOp op, uint64_t a, uint64_t b) {
     if (op == ATRI_EQ) return a == b;
     if (op == ATRI_NE) return a != b;
+    if (type == ATRI_IR_U8) { return op == ATRI_LT ? a < b : op == ATRI_LE ? a <= b : op == ATRI_GT ? a > b : a >= b; }
     int64_t x = type == ATRI_IR_I32 ? atri_i32_signed((uint32_t)a) : atri_i64_signed(a);
     int64_t y = type == ATRI_IR_I32 ? atri_i32_signed((uint32_t)b) : atri_i64_signed(b);
     return op == ATRI_LT ? x < y : op == ATRI_LE ? x <= y : op == ATRI_GT ? x > y : x >= y;
 }
 const char *atri_ir_type_name(AtriIRType type) {
-    return type == ATRI_IR_I64 ? "i64" : type == ATRI_IR_PTR_I32 ? "*i32" : type == ATRI_IR_PTR_CHAR ? "*char" :
-        type == ATRI_IR_I32 ? "i32" : type == ATRI_IR_BOOL ? "bool" : atri_ir_is_struct(type) ? "struct" : type >= ATRI_IR_PTR_STRUCT ? "*struct" : "<invalid>";
+    return type == ATRI_IR_U8 ? "u8" : type == ATRI_IR_PTR_U8 ? "*u8" : atri_ir_is_array(type) ? "array" : type == ATRI_IR_I64 ? "i64" : type == ATRI_IR_PTR_I32 ? "*i32" : type == ATRI_IR_PTR_CHAR ? "*char" :
+        type == ATRI_IR_I32 ? "i32" : type == ATRI_IR_BOOL ? "bool" : atri_ir_is_struct(type) ? "struct" : type >= ATRI_IR_PTR_STRUCT ? (atri_ir_is_array(atri_ir_pointee(type)) ? "*array" : "*struct") : "<invalid>";
 }
 /* 以无符号位模式实现目标位宽的环绕，避免宿主 C 的有符号溢出改变编译期结果。 */
 bool atri_i32_compute(AtriOp op, uint32_t a, uint32_t b, uint32_t *result) {
@@ -45,6 +46,12 @@ bool atri_i32_compute(AtriOp op, uint32_t a, uint32_t b, uint32_t *result) {
     }
 }
 bool atri_integer_compute(AtriIRType type, AtriOp op, uint64_t a, uint64_t b, uint64_t *result) {
+    if (type == ATRI_IR_U8) {
+        if ((op == ATRI_DIV || op == ATRI_REM) && b == 0) { return false; }
+        uint32_t bits;
+        if (!atri_i32_compute(op, (uint32_t)a, (uint32_t)b, &bits)) { return false; }
+        *result = (uint8_t)bits; return true;
+    }
     if (type == ATRI_IR_I32) {
         uint32_t bits;
         if (!atri_i32_compute(op, (uint32_t)a, (uint32_t)b, &bits)) return false;
@@ -77,10 +84,15 @@ void atri_ir_destroy(AtriIRProgram *p) {
     for (size_t i = 0; i < p->string_count; ++i) {
         free(p->strings[i].bytes);
     }
-    free(p->structs); free(p->fields);
+    free(p->arrays); free(p->structs); free(p->fields);
     free(p->globals); free(p->strings); free(p->functions); *p = (AtriIRProgram){0};
 }
 void atri_dump_ir(FILE *s, AtriSource source, const AtriIRProgram *p) {
+    for (size_t i = 0; i < p->array_count; ++i) {
+        fprintf(s, "type @array.%zu [%zu]%s size %zu align %zu\n", i, p->arrays[i].length,
+            atri_ir_type_name(p->arrays[i].element), atri_ir_type_size(p, (AtriIRType)(ATRI_IR_ARRAY+i)),
+            atri_ir_type_align(p, (AtriIRType)(ATRI_IR_ARRAY+i)));
+    }
     for (size_t i = 0; i < p->struct_count; ++i) {
         const AtriIRStruct *t = &p->structs[i];
         fprintf(s, "type @struct.%zu %.*s size %zu align %zu\n", i, (int)(t->name.end-t->name.start), source.text+t->name.start, t->size, t->alignment);
@@ -132,6 +144,7 @@ void atri_dump_ir(FILE *s, AtriSource source, const AtriIRProgram *p) {
                     }
                     break;
                 case ATRI_IR_ZERO: fprintf(s, "zero %s", atri_ir_type_name(v->type)); break;
+                case ATRI_IR_INDEX: fprintf(s, "index_location %s %%%zu, %%%zu", atri_ir_type_name(v->type), v->left, v->right); break;
                 case ATRI_IR_FIELD: fprintf(s, "field_location %s %%%zu field %" PRIu64, atri_ir_type_name(v->type), v->left, v->immediate); break;
                 case ATRI_IR_LOCAL:
                     if (v->immediate) { fprintf(s, "global_location %s @global.%" PRIu64, atri_ir_type_name(v->type), v->immediate-1); }

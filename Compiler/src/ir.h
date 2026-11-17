@@ -3,14 +3,16 @@
 #include "frontend.h"
 #include <stdint.h>
 
-/* 类型描述 IR 值；LOCAL/FIELD 例外，type 描述存储内容，本身不能作为普通值或指针使用。 */
-typedef enum { ATRI_IR_I32, ATRI_IR_I64, ATRI_IR_PTR_I32, ATRI_IR_BOOL, ATRI_IR_PTR_CHAR, ATRI_IR_INVALID, ATRI_IR_STRUCT = 256, ATRI_IR_PTR_STRUCT = 1048576 } AtriIRType;
+/* 类型描述 IR 值；LOCAL/FIELD/INDEX 例外，type 描述存储内容，本身不能作为普通值或指针使用。 */
+typedef enum { ATRI_IR_I32, ATRI_IR_I64, ATRI_IR_PTR_I32, ATRI_IR_BOOL, ATRI_IR_PTR_CHAR, ATRI_IR_INVALID,
+    ATRI_IR_U8, ATRI_IR_PTR_U8, ATRI_IR_STRUCT = 256, ATRI_IR_ARRAY = 524288, ATRI_IR_PTR_STRUCT = 1048576 } AtriIRType;
 typedef enum {
     ATRI_IR_NOP, ATRI_IR_PARAM, ATRI_IR_CONST, ATRI_IR_UNARY,
     ATRI_IR_BINARY, ATRI_IR_CALL, ATRI_IR_RETURN,
     ATRI_IR_LOCAL, ATRI_IR_LOAD, ATRI_IR_STORE,
     ATRI_IR_PTR_OFFSET, ATRI_IR_PTR_DIFF, ATRI_IR_ADDRESS, ATRI_IR_COMPARE,
     ATRI_IR_LABEL, ATRI_IR_JUMP, ATRI_IR_BRANCH, ATRI_IR_UNREACHABLE, ATRI_IR_STRING, ATRI_IR_ZERO, ATRI_IR_FIELD,
+    ATRI_IR_INDEX, ATRI_IR_LAZY_SELECT,
     ATRI_IR_LAZY_LOGICAL /* 常量初始化中的私有短路指令，公开可执行 IR 中不允许保留。 */
 } AtriIRKind;
 typedef struct {
@@ -19,7 +21,7 @@ typedef struct {
     AtriSpan span;
     AtriOp op;
     uint64_t immediate; /* LOCAL: 0 为栈对象，非零为 globals 索引 + 1；FIELD 为 fields 索引。 */
-    AtriId left, right, callee;
+    AtriId left, right, callee; /* 私有 LAZY_SELECT 的 callee 保存 false 分支值 ID。 */
     size_t first_argument, argument_count;
     AtriId target, alternative; /* 跳转的块 ID，与 left/right 使用的指令 ID 不同。 */
 } AtriIRInst;
@@ -55,7 +57,10 @@ typedef struct { AtriSpan name; AtriIRType type; uint64_t bits; bool constant; }
 
 typedef struct { AtriSpan name; AtriIRType type; size_t offset; uint64_t default_bits; } AtriIRField;
 typedef struct { AtriSpan name; size_t first_field, field_count, size, alignment; unsigned state; } AtriIRStruct;
+typedef struct { AtriIRType element; size_t length; } AtriIRArray;
 typedef struct {
+    AtriIRArray *arrays;
+    size_t array_count, array_capacity;
     AtriIRStruct *structs;
     size_t struct_count;
     AtriIRField *fields;
@@ -82,12 +87,14 @@ bool atri_emit_x64(FILE *stream, AtriSource source, const AtriIRProgram *program
 int64_t atri_i32_signed(uint32_t bits);
 int64_t atri_i64_signed(uint64_t bits);
 bool atri_ir_is_struct(AtriIRType type);
+bool atri_ir_is_array(AtriIRType type);
+bool atri_ir_is_aggregate(AtriIRType type);
 AtriIRType atri_ir_pointee(AtriIRType type);
 AtriIRType atri_ir_pointer_type(AtriIRType type);
 size_t atri_ir_type_size(const AtriIRProgram *program, AtriIRType type);
 size_t atri_ir_type_align(const AtriIRProgram *program, AtriIRType type);
 bool atri_ir_valid_type(const AtriIRProgram *program, AtriIRType type);
-bool atri_type_from_source(AtriSource source, const AtriProgram *ast, AtriSpan span, AtriIRType *type, AtriDiagnostic *diagnostic);
+bool atri_type_from_source(AtriSource source, const AtriProgram *ast, AtriIRProgram *program, AtriSpan span, AtriIRType *type, AtriDiagnostic *diagnostic);
 bool atri_layout_structs(AtriSource source, const AtriProgram *ast, AtriIRProgram *program, AtriDiagnostic *diagnostic);
 bool atri_ir_is_integer(AtriIRType type);
 bool atri_ir_is_pointer(AtriIRType type);

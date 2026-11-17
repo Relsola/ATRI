@@ -8,6 +8,8 @@ static const char *c_type(AtriIRType type) {
         return name;
     }
     switch (type) {
+        case ATRI_IR_U8: return "uint8_t";
+        case ATRI_IR_PTR_U8: return "uint8_t *";
         case ATRI_IR_I32: return "int32_t";
         case ATRI_IR_I64: return "int64_t";
         case ATRI_IR_BOOL: return "bool";
@@ -23,12 +25,19 @@ static void emit_struct(FILE *header, const TestIR *ir, size_t index, bool *emit
     if (!t->size) { fputs("zero-size structs have no C test binding\n", stderr); exit(EXIT_FAILURE); }
     for (size_t i = 0; i < t->field_count; ++i) {
         AtriIRType type = ir->program.fields[t->first_field+i].type;
+        while (atri_ir_is_array(type)) { type = ir->program.arrays[type-ATRI_IR_ARRAY].element; }
         if (atri_ir_is_struct(type)) { emit_struct(header, ir, type-ATRI_IR_STRUCT, emitted); }
     }
     fprintf(header, "struct atri_struct_%zu {\n", index);
     for (size_t i = 0; i < t->field_count; ++i) {
         const AtriIRField *field = &ir->program.fields[t->first_field+i];
-        fprintf(header, "    %s %.*s;\n", c_type(field->type), (int)(field->name.end-field->name.start), ir->source.text+field->name.start);
+        AtriIRType element = field->type;
+        while (atri_ir_is_array(element)) { element = ir->program.arrays[element-ATRI_IR_ARRAY].element; }
+        fprintf(header, "    %s %.*s", c_type(element), (int)(field->name.end-field->name.start), ir->source.text+field->name.start);
+        for (AtriIRType type = field->type; atri_ir_is_array(type); type = ir->program.arrays[type-ATRI_IR_ARRAY].element) {
+            fprintf(header, "[%zu]", ir->program.arrays[type-ATRI_IR_ARRAY].length);
+        }
+        fputs(";\n", header);
     }
     fputs("};\n", header); emitted[index] = true;
 }

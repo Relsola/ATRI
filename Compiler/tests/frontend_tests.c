@@ -160,7 +160,23 @@ static void struct_ast(void) {
     CHECK(target->kind == ATRI_EXPR_FIELD && program.expressions[target->left].kind == ATRI_EXPR_DEREFERENCE);
     atri_program_destroy(&program);
 }
+static void array_and_run_ast(void) {
+    AtriSource input = source("run n:i32 := 2;fn f()->i32{data:[2][2]u8={{1,2},{3,4}};return run (true?1:false?2:3);}");
+    AtriProgram p;
+    AtriDiagnostic d;
+    CHECK(atri_parse(input, &p, &d));
+    CHECK(p.global_count == 1 && p.globals[0].declaration.kind == ATRI_STMT_CONSTANT);
+    CHECK(p.array_type_count == 2 && p.initializer_count == 6);
+    const AtriExpr *run = &p.expressions[p.statements[1].expression];
+    CHECK(run->kind == ATRI_EXPR_RUN);
+    const AtriExpr *select = &p.expressions[run->left];
+    CHECK(select->kind == ATRI_EXPR_CONDITIONAL && p.expressions[select->alternative].kind == ATRI_EXPR_CONDITIONAL);
+    atri_program_destroy(&p);
+    reject(source("fn f()->i32{a:[2]i32;return a[0;}"), "expected ']'");
+    reject(source("fn f()->i32{return true?1;}"), "expected ':'");
+}
 int main(void) {
+    array_and_run_ast();
     struct_ast(); ast_and_precedence(); lexical_and_locations(); pointer_ast(); errors_and_growth(); attributes_and_strings();
     puts("frontend tests passed"); return 0;
 }

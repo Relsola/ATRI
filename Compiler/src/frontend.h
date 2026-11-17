@@ -37,13 +37,14 @@ typedef enum {
 } AtriOp;
 typedef enum {
     ATRI_EXPR_INTEGER, ATRI_EXPR_NAME, ATRI_EXPR_UNARY, ATRI_EXPR_BINARY, ATRI_EXPR_CALL,
-    ATRI_EXPR_ADDRESS, ATRI_EXPR_DEREFERENCE, ATRI_EXPR_NULL, ATRI_EXPR_BOOL, ATRI_EXPR_STRING, ATRI_EXPR_FIELD, ATRI_EXPR_INITIALIZER
+    ATRI_EXPR_ADDRESS, ATRI_EXPR_DEREFERENCE, ATRI_EXPR_NULL, ATRI_EXPR_BOOL, ATRI_EXPR_STRING, ATRI_EXPR_FIELD, ATRI_EXPR_INITIALIZER,
+    ATRI_EXPR_INDEX, ATRI_EXPR_CONDITIONAL, ATRI_EXPR_RUN
 } AtriExprKind;
 typedef struct {
     AtriExprKind kind;
     AtriSpan span, text, qualifier;
     AtriOp op;
-    AtriId left, right;
+    AtriId left, right, alternative;
     size_t first_argument, argument_count;
     size_t tree_depth;
     bool boolean;
@@ -64,6 +65,7 @@ typedef struct {
     AtriSpan span;
     size_t first_statement, statement_count;
 } AtriBlock;
+typedef struct { AtriSpan span, element; AtriId length; } AtriArrayType;
 typedef struct { AtriSpan name, type; } AtriParameter;
 
 typedef struct {
@@ -95,6 +97,8 @@ typedef struct {
 
 /* 节点以稳定 ID 互相引用，扩容不使引用失效；块的语句范围指向 block_statements 边数组。 */
 typedef struct {
+    AtriArrayType *array_types;
+    size_t array_type_count;
     AtriStruct *structs;
     size_t struct_count;
     AtriField *fields;

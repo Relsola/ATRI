@@ -105,7 +105,7 @@ static bool value(Frame *frame, AtriId id, uint64_t *out) {
     Evaluation *e = frame->evaluation;
     AtriIRFunction *f = frame->function;
     const AtriIRInst *inst = &f->instructions[id];
-    if (atri_ir_is_struct(inst->type) || inst->kind == ATRI_IR_FIELD) { return error(e, inst->span, "compile-time struct values are not supported yet"); }
+    if (atri_ir_is_aggregate(inst->type) || inst->kind == ATRI_IR_FIELD || inst->kind == ATRI_IR_INDEX) { return error(e, inst->span, "compile-time struct and array values are not supported yet"); }
     if ((!atri_ir_is_integer(inst->type) && inst->type != ATRI_IR_BOOL) || inst->kind == ATRI_IR_LOCAL ||
         inst->kind == ATRI_IR_STORE || inst->kind == ATRI_IR_PTR_DIFF || inst->kind == ATRI_IR_ADDRESS ||
         (inst->kind == ATRI_IR_LOAD && (f->instructions[inst->left].kind != ATRI_IR_LOCAL || f->instructions[inst->left].immediate != 0)))
@@ -125,6 +125,11 @@ static bool value(Frame *frame, AtriId id, uint64_t *out) {
         }
     switch (inst->kind) {
         case ATRI_IR_LOAD: *out = frame->locals[inst->left]; ok = true; break;
+        case ATRI_IR_LAZY_SELECT: {
+            uint64_t condition;
+            if (value(frame, inst->left, &condition)) { ok = value(frame, condition ? inst->right : inst->callee, out); }
+            break;
+        }
         case ATRI_IR_LAZY_LOGICAL: {
             uint64_t a;
             if (!value(frame, inst->left, &a)) break;

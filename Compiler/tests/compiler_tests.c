@@ -50,7 +50,7 @@ static void arithmetic(void) {
 static void names_and_types(void) {
     EXPECT_COMPILE_ERROR("fn f()->i32{x: i32 :=1;x=2;return x;}", "cannot assign");
     EXPECT_COMPILE_ERROR("fn f(x:i32)->i32{x=2;return x;}", "cannot assign");
-    EXPECT_COMPILE_ERROR("fn f()->i32{x:u64=1;return x;}", "only i32");
+    EXPECT_COMPILE_ERROR("fn f()->i32{x:u64=1;return x;}", "unknown or private type");
     EXPECT_COMPILE_ERROR("fn f()->i32{g: i32 :=1;return g();}", "not callable");
     EXPECT_COMPILE_ERROR("fn f()->i32{x:i32;}", "must return");
     EXPECT_COMPILE_ERROR("fn f()->i32{return a;a: i32 :=1;}", "unknown local");
@@ -63,9 +63,9 @@ static void names_and_types(void) {
     EXPECT_COMPILE_ERROR("fn f()->i32{a:i32=a;return a;}", "unknown local");
     EXPECT_COMPILE_ERROR("fn f()->i32{a=1;return 0;}", "unknown name");
     EXPECT_COMPILE_ERROR("fn f()->i32{g: i32 :=1;return g();}", "not callable");
-    EXPECT_COMPILE_ERROR("fn f()->u64{return 1;}", "only i32");
-    EXPECT_COMPILE_ERROR("fn f(a:f32)->i32{return 1;}", "only i32");
-    EXPECT_COMPILE_ERROR("fn f()->i32{a: u64 :=1;return 0;}", "only i32");
+    EXPECT_COMPILE_ERROR("fn f()->u64{return 1;}", "unknown or private type");
+    EXPECT_COMPILE_ERROR("fn f(a:f32)->i32{return 1;}", "unknown or private type");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a: u64 :=1;return 0;}", "unknown or private type");
     EXPECT_COMPILE_ERROR("fn f()->i32{}", "must return");
     EXPECT_COMPILE_ERROR("fn f()->i32{return 0;return missing;}", "unknown local");
 }
@@ -238,7 +238,66 @@ static void c_calls_and_strings(void) {
         "fn f()->i32{n:i32 :=wrapper();return n;}", "cannot execute at compile time");
     EXPECT_COMPILE_ERROR("[[extern(C)]] fn puts(p:*char)->i32;fn f()->i32{n:i32 :=puts(\"text\");return n;}", "cannot execute at compile time");
 }
+static void arrays_and_run(void) {
+    Compilation test = test_compile("run and conditional",
+        "fn max(a:i32,b:i32)->i32{return a>b?a:b;}"
+        "run a:i32 := max(1,2);fn main()->i32{return a;}", TEST_O0);
+    EXPECT_RETURN_I32(test.before, "main", 2);
+    EXPECT_NO_CALLS(test.before, "main");
+    test_destroy(&test);
+    test = test_compile("run expression", "fn f()->i64{return 9;}fn main()->i64{return run f();}", TEST_O0);
+    EXPECT_RETURN_I64(test.before, "main", 9);
+    EXPECT_NO_CALLS(test.before, "main");
+    test_destroy(&test);
+    test = test_compile("lazy conditional", "[[extern(C)]]fn ext()->i32;fn main()->i32{n:i32 := false?ext():7;return n;}", TEST_O0);
+    EXPECT_RETURN_I32(test.before, "main", 7);
+    EXPECT_NO_CALLS(test.before, "main");
+    test_destroy(&test);
+    test = test_compile("constant byte", "fn byte()->u8{n:u8 := 250+10;return n;}", TEST_O1);
+    AtriIRFunction *byte = test_function(&test.after, "byte");
+    CHECK(byte->instructions[byte->instruction_count-2].immediate == 4);
+    test_destroy(&test);
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32;return a[2];}", "out of bounds");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32;return a[-1];}", "out of bounds");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32;return a[1+1];}", "out of bounds");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32;n:i32 := 2;return a[n];}", "out of bounds");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[0]i32;return a[0];}", "out of bounds");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32={1,2,3};return 0;}", "too many array");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32={.x=1};return 0;}", "positional");
+    EXPECT_COMPILE_ERROR("struct S{x:i32;}fn f()->i32{s:S={1};return 0;}", "named fields");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32;return a[true];}", "index requires");
+    EXPECT_COMPILE_ERROR("fn f(a:[2]i32)->i32{a[0]=1;return 0;}", "read-only");
+    EXPECT_COMPILE_ERROR("fn f()->[2]i32{return {1,2};}fn g()->i32{f()[0]=1;return 0;}", "temporary array");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32;b:[3]i32=a;return 0;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[-1]i32;return 0;}", "array length");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[4096]i32;return 0;}", "size limit");
+    EXPECT_COMPILE_ERROR("N:i32=2;fn f()->i32{a:[N]i32;return 0;}", "array length");
+    EXPECT_COMPILE_ERROR("struct S{a:[1]S;}fn f()->i32{return 0;}", "cyclic");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]u8={256};return 0;}", "outside");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]u8;return a[0];}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->*i32{a:[2]i32;return &a[0];}", "address of a local");
+    EXPECT_COMPILE_ERROR("fn f(a:i32)->i32{return run a;}", "runtime variable or parameter");
+    EXPECT_COMPILE_ERROR("[[extern(C)]]fn ext()->i32;fn f()->i32{return run ext();}", "cannot execute at compile time");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return run (1/0);}", "by zero");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return 1?2:3;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return true?1:false;}", "type mismatch");
+    EXPECT_PARSE_ERROR("fn f()->i32{run a:i32=1;return a;}", "requires ':='");
+    EXPECT_COMPILE_ERROR("N:i32 :=2;fn f(N:i32)->i32{a:[N]i32;return 0;}", "array length");
+    EXPECT_COMPILE_ERROR("N:i32 :=2;fn f()->i32{N:i32=3;a:[N]i32;return 0;}", "array length");
+    EXPECT_COMPILE_ERROR("N:i32 :=2;fn f()->i32{for(N:i32=3;false;){a:[N]i32;}return 0;}", "array length");
+    EXPECT_COMPILE_ERROR("[[extern(C)]]fn f(a:[2]i32)->i32;", "arrays and zero-size");
+    EXPECT_COMPILE_ERROR("a:[2]i32;fn main()->i32{return 0;}", "array storage");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32 := {1,2};return 0;}", "array constants");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32;return run a[0];}", "runtime variable or parameter");
+    EXPECT_COMPILE_ERROR("fn f()->i32{n:i32 :=f();a:[n]i32;return 0;}", "array length");
+    EXPECT_COMPILE_ERROR("N:i32 :=-1;fn f()->i32{a:[N]i32;return 0;}", "array length");
+    test = test_compile("recursive array pointer", "struct Node{next:*[2]Node;}fn f()->i32{return 0;}", TEST_O0);
+    EXPECT_VALID_IR(test.after);
+    test_destroy(&test);
+
+}
 int main(void) {
+    arrays_and_run();
     arithmetic();
     names_and_types();
     compile_time_constants();

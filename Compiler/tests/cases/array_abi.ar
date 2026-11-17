@@ -1,0 +1,16 @@
+struct Small { bytes: [3]u8; tail: u8; }
+struct Big { values: [3]i64; }
+[[extern(C)]] fn c_byte(p: *u8, a: u8, b: u8, c: u8, d: u8) -> u8;
+[[extern(C)]] fn c_small(s: Small) -> Small;
+[[extern(C)]] fn c_big(s: Big) -> Big;
+fn same_small(s: Small) -> Small { return s; }
+fn same_big(s: Big) -> Big { return s; }
+fn call_c() -> i32 {
+    data: [3]u8 = {1, 2, 3};
+    if (c_byte(&data[1], 200, 201, 202, 255) != 255 || data[1] != 240) { return 1; }
+    small: Small = c_small({.bytes = {200, 2, 3}, .tail = 255});
+    if (small.bytes[0] != 201 || small.tail != 255) { return 2; }
+    big: Big = c_big({.values = {1, 2, 3}});
+    if (big.values[0] != 7 || big.values[1] != 2 || big.values[2] != 3) { return 3; }
+    return 0;
+}

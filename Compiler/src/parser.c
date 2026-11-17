@@ -11,7 +11,7 @@ typedef struct {
     size_t functions_cap, parameters_cap, statements_cap, expressions_cap, arguments_cap;
     size_t blocks_cap, block_statements_cap, statement_depth;
     size_t depth;
-    size_t imports_cap, globals_cap, structs_cap, fields_cap, initializers_cap;
+    size_t array_types_cap, imports_cap, globals_cap, structs_cap, fields_cap, initializers_cap;
 } Parser;
 
 static bool fail(Parser *p, const char *message) {
@@ -34,10 +34,19 @@ static bool append_expr(Parser *p, AtriExpr e, AtriId *id) {
     /* 左结合长链不会显著增加解析递归深度，但仍会生成深树；单独限制树高以保护后续遍历。 */
     e.tree_depth = 1;
     if (e.kind == ATRI_EXPR_UNARY || e.kind == ATRI_EXPR_BINARY ||
-        e.kind == ATRI_EXPR_ADDRESS || e.kind == ATRI_EXPR_DEREFERENCE || e.kind == ATRI_EXPR_FIELD)
+        e.kind == ATRI_EXPR_ADDRESS || e.kind == ATRI_EXPR_DEREFERENCE || e.kind == ATRI_EXPR_FIELD ||
+        e.kind == ATRI_EXPR_INDEX || e.kind == ATRI_EXPR_CONDITIONAL || e.kind == ATRI_EXPR_RUN)
         e.tree_depth = p->program.expressions[e.left].tree_depth + 1;
-    if (e.kind == ATRI_EXPR_BINARY && p->program.expressions[e.right].tree_depth + 1 > e.tree_depth)
+    if ((e.kind == ATRI_EXPR_BINARY || e.kind == ATRI_EXPR_INDEX || e.kind == ATRI_EXPR_CONDITIONAL) && p->program.expressions[e.right].tree_depth + 1 > e.tree_depth)
         e.tree_depth = p->program.expressions[e.right].tree_depth + 1;
+    if (e.kind == ATRI_EXPR_CONDITIONAL && p->program.expressions[e.alternative].tree_depth + 1 > e.tree_depth)
+        e.tree_depth = p->program.expressions[e.alternative].tree_depth + 1;
+    if (e.kind == ATRI_EXPR_INITIALIZER) {
+        for (size_t i = 0; i < e.argument_count; ++i) {
+            size_t depth = p->program.expressions[p->program.initializers[e.first_argument+i].expression].tree_depth+1;
+            if (depth > e.tree_depth) { e.tree_depth = depth; }
+        }
+    }
     if (e.kind == ATRI_EXPR_CALL)
         for (size_t a = 0; a < e.argument_count; ++a) {
             size_t depth = p->program.expressions[p->program.arguments[e.first_argument + a]].tree_depth + 1;
@@ -53,6 +62,13 @@ static bool parse_expression(Parser *p, int minimum, AtriId *result);
 
 static bool parse_primary(Parser *p, AtriId *result) {
     AtriToken token = p->current;
+    if (token.kind == ATRI_TOKEN_RUN) {
+        advance(p);
+        AtriId operand;
+        if (!parse_expression(p, 30, &operand)) { return false; }
+        return append_expr(p, (AtriExpr){.kind = ATRI_EXPR_RUN, .left = operand,
+            .span = {token.span.start, p->program.expressions[operand].span.end}}, result);
+    }
     if (token.kind == ATRI_TOKEN_LEFT_BRACE) {
         AtriExpr e = {.kind = ATRI_EXPR_INITIALIZER, .span.start = token.span.start};
         AtriInitializer *items = NULL;
@@ -60,12 +76,13 @@ static bool parse_primary(Parser *p, AtriId *result) {
         bool ok = false;
         advance(p);
         while (p->current.kind != ATRI_TOKEN_RIGHT_BRACE) {
-            AtriInitializer item;
-            if (!expect(p, ATRI_TOKEN_DOT, "expected '.field = expression' in struct initializer")) { goto initializer_done; }
-            item.name = p->current.span;
-            if (!expect(p, ATRI_TOKEN_IDENTIFIER, "expected field name") ||
-                !expect(p, ATRI_TOKEN_EQUAL, "expected '=' after field name") ||
-                !parse_expression(p, 0, &item.expression)) { goto initializer_done; }
+            AtriInitializer item = {0};
+            if (p->current.kind == ATRI_TOKEN_DOT) {
+                advance(p); item.name = p->current.span;
+                if (!expect(p, ATRI_TOKEN_IDENTIFIER, "expected field name") ||
+                    !expect(p, ATRI_TOKEN_EQUAL, "expected '=' after field name")) { goto initializer_done; }
+            }
+            if (!parse_expression(p, 0, &item.expression)) { goto initializer_done; }
             if (!atri_append((void **)&items, &count, &capacity, sizeof(item), &item)) { fail(p, "out of memory"); goto initializer_done; }
             if (p->current.kind != ATRI_TOKEN_COMMA) { break; }
             advance(p);
@@ -198,6 +215,15 @@ static bool parse_expression(Parser *p, int minimum, AtriId *result) {
     AtriId left;
     if (!parse_primary(p, &left)) goto done;
     for (;;) {
+        if (p->current.kind == ATRI_TOKEN_LEFT_BRACKET) {
+            advance(p);
+            AtriId index;
+            if (!parse_expression(p, 0, &index)) { goto done; }
+            AtriExpr e = {.kind = ATRI_EXPR_INDEX, .left = left, .right = index,
+                .span = {p->program.expressions[left].span.start, p->current.span.end}};
+            if (!expect(p, ATRI_TOKEN_RIGHT_BRACKET, "expected ']' after index") || !append_expr(p, e, &left)) { goto done; }
+            continue;
+        }
         if (p->current.kind == ATRI_TOKEN_DOT) {
             advance(p);
             AtriExpr field = {.kind = ATRI_EXPR_FIELD, .left = left, .text = p->current.span,
@@ -216,6 +242,14 @@ static bool parse_expression(Parser *p, int minimum, AtriId *result) {
         if (!append_expr(p, (AtriExpr){.kind = ATRI_EXPR_BINARY,
                 .span = span, .op = op, .left = left, .right = right}, &left)) goto done;
     }
+    if (minimum == 0 && p->current.kind == ATRI_TOKEN_QUESTION) {
+        advance(p);
+        AtriId yes, no;
+        if (!parse_expression(p, 0, &yes) || !expect(p, ATRI_TOKEN_COLON, "expected ':' in conditional expression") ||
+            !parse_expression(p, 0, &no)) { goto done; }
+        if (!append_expr(p, (AtriExpr){.kind = ATRI_EXPR_CONDITIONAL, .left = left, .right = yes, .alternative = no,
+                .span = {p->program.expressions[left].span.start, p->program.expressions[no].span.end}}, &left)) { goto done; }
+    }
     *result = left;
     success = !p->failed;
 done:
@@ -224,7 +258,26 @@ done:
 }
 static bool parse_type(Parser *p, AtriSpan *span, const char *message) {
     span->start = p->current.span.start;
-    while (p->current.kind == ATRI_TOKEN_STAR) advance(p);
+    if (++p->depth > 256) { --p->depth; return fail(p, "type nesting exceeds the prototype limit of 256"); }
+    if (p->current.kind == ATRI_TOKEN_STAR || p->current.kind == ATRI_TOKEN_LEFT_BRACKET) {
+        AtriTokenKind prefix = p->current.kind;
+        advance(p);
+        AtriId length;
+        AtriSpan element;
+        bool ok = (prefix != ATRI_TOKEN_LEFT_BRACKET ||
+            (parse_expression(p, 0, &length) && expect(p, ATRI_TOKEN_RIGHT_BRACKET, "expected ']' after array length"))) &&
+            parse_type(p, &element, message);
+        if (ok) {
+            span->end = element.end;
+            if (prefix == ATRI_TOKEN_LEFT_BRACKET) {
+                AtriArrayType array = {.span = *span, .element = element, .length = length};
+                ok = atri_append((void **)&p->program.array_types, &p->program.array_type_count,
+                    &p->array_types_cap, sizeof(array), &array) || fail(p, "out of memory while parsing array type");
+            }
+        }
+        --p->depth; return ok;
+    }
+    --p->depth;
     span->end = p->current.span.end;
     if (!expect(p, ATRI_TOKEN_IDENTIFIER, message)) { return false; }
     if (p->current.kind == ATRI_TOKEN_SCOPE) {
@@ -284,6 +337,11 @@ static AtriStatement new_statement(Parser *p) {
 }
 static bool simple_statement(Parser *p, AtriStatement *st, bool declarations) {
     AtriStatement s = *st;
+    bool run = p->current.kind == ATRI_TOKEN_RUN;
+    if (run) {
+        advance(p);
+        if (!declaration_start(p)) { return fail(p, "run declaration requires 'name: Type := expression'"); }
+    }
     if (declaration_start(p)) {
         if (!declarations) return fail(p, "a for step cannot declare a variable");
         s.name = p->current.span;
@@ -310,6 +368,9 @@ static bool simple_statement(Parser *p, AtriStatement *st, bool declarations) {
                 return fail(p, "expected ':' for a declaration or '=' for an assignment");
             s.kind = ATRI_STMT_EXPR; s.expression = lhs;
         }
+    }
+    if (run && (s.kind != ATRI_STMT_CONSTANT || s.expression == ATRI_NONE)) {
+        return fail(p, "run declaration requires ':=' and a compile-time initializer");
     }
     *st = s; return true;
 }
@@ -395,8 +456,9 @@ static bool parse_function(Parser *p) {
     AtriFunction f = {.span.start = p->current.span.start,
         .first_parameter = p->program.parameter_count,
         .first_statement = p->program.statement_count, .block = ATRI_NONE};
-    if (p->current.kind == ATRI_TOKEN_ATTRIBUTE_OPEN) {
+    if (p->current.kind == ATRI_TOKEN_LEFT_BRACKET) {
         advance(p);
+        if (!expect(p, ATRI_TOKEN_LEFT_BRACKET, "expected '[[' before attribute")) { return false; }
         AtriSpan attribute = p->current.span;
         if (p->current.kind != ATRI_TOKEN_IDENTIFIER || attribute.end-attribute.start != 6 ||
             memcmp(p->lexer.source.text+attribute.start, "extern", 6) != 0) {
@@ -413,7 +475,8 @@ static bool parse_function(Parser *p) {
         }
         advance(p);
         if (!expect(p, ATRI_TOKEN_RIGHT_PAREN, "expected ')' after extern(C") ||
-            !expect(p, ATRI_TOKEN_ATTRIBUTE_CLOSE, "expected ']]' after attribute")) {
+            !expect(p, ATRI_TOKEN_RIGHT_BRACKET, "expected ']]' after attribute") ||
+            !expect(p, ATRI_TOKEN_RIGHT_BRACKET, "expected ']]' after attribute")) {
             return false;
         }
         f.external_c = true;
@@ -507,7 +570,7 @@ bool atri_parse_sources(AtriSource source, const AtriModule *modules, size_t cou
             if (!expect(&p, ATRI_TOKEN_STRING, "expected a module path") ||
                 !expect(&p, ATRI_TOKEN_SEMICOLON, "expected ';' after import")) break;
             if (!atri_append((void **)&p.program.imports, &p.program.import_count, &p.imports_cap, sizeof(item), &item)) { fail(&p, "out of memory"); break; }
-        } else if (declaration_start(&p)) {
+        } else if (declaration_start(&p) || p.current.kind == ATRI_TOKEN_RUN) {
             AtriGlobal item = {.declaration = new_statement(&p), .exported = exported};
             if (!simple_statement(&p, &item.declaration, true)) { break; }
             item.declaration.span.end = p.current.span.end;
@@ -528,7 +591,7 @@ bool atri_parse(AtriSource source, AtriProgram *output, AtriDiagnostic *diagnost
 }
 void atri_program_destroy(AtriProgram *p) {
     for (size_t i = 0; i < p->module_count; ++i) { free(p->modules[i].path); }
-    free(p->structs); free(p->fields); free(p->initializers);
+    free(p->array_types); free(p->structs); free(p->fields); free(p->initializers);
     free(p->symbols); free(p->modules); free(p->imports); free(p->globals);
     free(p->functions); free(p->parameters); free(p->statements);
     free(p->expressions); free(p->arguments); free(p->blocks); free(p->block_statements);
@@ -539,6 +602,16 @@ static void write_span(FILE *s, AtriSource source, AtriSpan span) {
 }
 static void dump_expr(FILE *s, AtriSource source, const AtriProgram *p, AtriId id) {
     const AtriExpr *e = &p->expressions[id];
+    if (e->kind == ATRI_EXPR_RUN) {
+        fputs("run ", s); dump_expr(s, source, p, e->left); return;
+    }
+    if (e->kind == ATRI_EXPR_INDEX) {
+        dump_expr(s, source, p, e->left); fputc('[', s); dump_expr(s, source, p, e->right); fputc(']', s); return;
+    }
+    if (e->kind == ATRI_EXPR_CONDITIONAL) {
+        fputc('(', s); dump_expr(s, source, p, e->left); fputs(" ? ", s);
+        dump_expr(s, source, p, e->right); fputs(" : ", s); dump_expr(s, source, p, e->alternative); fputc(')', s); return;
+    }
     if (e->kind == ATRI_EXPR_FIELD) {
         dump_expr(s, source, p, e->left); fputc('.', s); write_span(s, source, e->text); return;
     }
@@ -546,7 +619,9 @@ static void dump_expr(FILE *s, AtriSource source, const AtriProgram *p, AtriId i
         fputc('{', s);
         for (size_t i = 0; i < e->argument_count; ++i) {
             const AtriInitializer *item = &p->initializers[e->first_argument+i];
-            fputs(i ? ", ." : ".", s); write_span(s, source, item->name); fputs(" = ", s); dump_expr(s, source, p, item->expression);
+            if (i) { fputs(", ", s); }
+            if (item->name.end) { fputc('.', s); write_span(s, source, item->name); fputs(" = ", s); }
+            dump_expr(s, source, p, item->expression);
         }
         fputc('}', s); return;
     }

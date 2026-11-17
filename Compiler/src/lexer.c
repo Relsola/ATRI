@@ -64,6 +64,7 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
         }
         size_t count = lexer->offset - start;
         AtriTokenKind kind = ATRI_TOKEN_IDENTIFIER;
+        if (count == 3 && memcmp(text + start, "run", 3) == 0) kind = ATRI_TOKEN_RUN;
         static const struct { const char *name; AtriTokenKind kind; } keywords[] = {
             {"struct", ATRI_TOKEN_STRUCT}, {"import", ATRI_TOKEN_IMPORT}, {"export", ATRI_TOKEN_EXPORT}, {"fn", ATRI_TOKEN_FN}, {"return", ATRI_TOKEN_RETURN}, {"null", ATRI_TOKEN_NULL},
             {"true", ATRI_TOKEN_TRUE}, {"false", ATRI_TOKEN_FALSE},
@@ -136,15 +137,10 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
             }
             return error_token(lexer, start, diagnostic, "unterminated string literal");
         case '[':
-            if (lexer->offset < length && text[lexer->offset] == '[') {
-                ++lexer->offset; return token(ATRI_TOKEN_ATTRIBUTE_OPEN, start, lexer->offset);
-            }
-            break;
+            return token(ATRI_TOKEN_LEFT_BRACKET, start, lexer->offset);
         case ']':
-            if (lexer->offset < length && text[lexer->offset] == ']') {
-                ++lexer->offset; return token(ATRI_TOKEN_ATTRIBUTE_CLOSE, start, lexer->offset);
-            }
-            break;
+            return token(ATRI_TOKEN_RIGHT_BRACKET, start, lexer->offset);
+        case '?': return token(ATRI_TOKEN_QUESTION, start, lexer->offset);
         case '(': return token(ATRI_TOKEN_LEFT_PAREN, start, lexer->offset);
         case ')': return token(ATRI_TOKEN_RIGHT_PAREN, start, lexer->offset);
         case '{': return token(ATRI_TOKEN_LEFT_BRACE, start, lexer->offset);

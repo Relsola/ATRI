@@ -15,7 +15,7 @@ static bool emit_fold(AtriIRFunction *out, AtriIRInst inst, AtriId *id, AtriDiag
         const AtriIRInst *offset = &out->instructions[inst.right];
         if (offset->kind == ATRI_IR_CONST) {
             int64_t n = offset->type == ATRI_IR_I32 ? atri_i32_signed((uint32_t)offset->immediate) : atri_i64_signed(offset->immediate);
-            int64_t stride = inst.type == ATRI_IR_PTR_CHAR ? 1 : 4;
+            int64_t stride = (inst.type == ATRI_IR_PTR_CHAR || inst.type == ATRI_IR_PTR_U8) ? 1 : 4;
             if (n < INT64_MIN / stride || n > INT64_MAX / stride) {
                 return diagnostic(d, inst.span, "pointer byte offset exceeds the signed 64-bit range");
             }
@@ -45,7 +45,7 @@ static bool is_leaf(const AtriIRFunction *f) {
     size_t active = 0;
     for (size_t i = 0; i < f->instruction_count; ++i) {
         AtriIRKind kind = f->instructions[i].kind;
-        if (f->instructions[i].type >= ATRI_IR_STRUCT || kind == ATRI_IR_FIELD) { return false; }
+        if (f->instructions[i].type >= ATRI_IR_STRUCT || kind == ATRI_IR_FIELD || kind == ATRI_IR_INDEX) { return false; }
         if (kind == ATRI_IR_CALL || kind == ATRI_IR_LOCAL || kind == ATRI_IR_LOAD || kind == ATRI_IR_STORE) return false;
         if (f->instructions[i].kind != ATRI_IR_NOP) ++active;
     }
@@ -102,7 +102,7 @@ bool atri_optimize(AtriIRProgram *p, bool inline_functions, AtriDiagnostic *d) {
             /* 上面的折叠/DCE 只适用于单块，不能跨分支套用：未执行路径中的非法运算也不能提前求值。 */
             bool aggregate = old->return_type >= ATRI_IR_STRUCT;
             for (size_t i = 0; i < old->instruction_count; ++i) {
-                if (old->instructions[i].type >= ATRI_IR_STRUCT || old->instructions[i].kind == ATRI_IR_FIELD) { aggregate = true; }
+                if (old->instructions[i].type >= ATRI_IR_STRUCT || old->instructions[i].kind == ATRI_IR_FIELD || old->instructions[i].kind == ATRI_IR_INDEX) { aggregate = true; }
             }
             if (old->external_c || old->block_count > 1 || aggregate) {
                 continue;

@@ -136,6 +136,24 @@ static void invalid_structs(void) {
     EXPECT_VALID_IR(test.after);
     test_destroy(&test);
 }
+static void invalid_arrays(void) {
+    Compilation test = test_compile("array verifier", "fn f(a:[2]i32,i:i32)->i32{return a[i];}", TEST_O0);
+    AtriIRFunction *f = test_function(&test.after, "f");
+    AtriId index = test_instruction(&test.after, "f", ATRI_IR_INDEX, 0);
+    EXPECT_VALID_IR(test.after);
+    f->instructions[index].type = ATRI_IR_U8;
+    EXPECT_INVALID_IR(test.after);
+    f->instructions[index].type = ATRI_IR_I32;
+    AtriId original = f->instructions[index].right;
+    f->instructions[index].right = index;
+    EXPECT_INVALID_IR(test.after);
+    f->instructions[index].right = original;
+    test.after.program.arrays[0].element = ATRI_IR_ARRAY;
+    EXPECT_INVALID_IR(test.after);
+    test.after.program.arrays[0].element = ATRI_IR_I32;
+    EXPECT_VALID_IR(test.after);
+    test_destroy(&test);
+}
 int main(void) {
     invalid_value_and_terminator();
     invalid_memory_operands();
@@ -144,6 +162,7 @@ int main(void) {
     invalid_external_and_string();
     invalid_globals();
     invalid_structs();
+    invalid_arrays();
     puts("IR verifier tests passed");
     return 0;
 }

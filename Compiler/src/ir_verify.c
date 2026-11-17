@@ -28,7 +28,7 @@ static bool operand(const Check *c, size_t use, AtriId id, AtriIRType type) {
 static bool location(const Check *c, size_t use, AtriId id, AtriIRType type) {
     if (!available(c, use, id)) return false;
     const AtriIRInst *v = &c->f->instructions[id];
-    return v->kind == ATRI_IR_LOCAL || v->kind == ATRI_IR_FIELD ? v->type == type :
+    return (v->kind == ATRI_IR_LOCAL || v->kind == ATRI_IR_FIELD || v->kind == ATRI_IR_INDEX) ? v->type == type :
         atri_ir_is_pointer(v->type) && atri_ir_pointee(v->type) == type && operand(c, use, id, v->type);
 }
 static bool terminator(AtriIRKind k) {
@@ -137,12 +137,23 @@ static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, Atr
             case ATRI_IR_LOCAL:
                 valid = v->immediate == 0 || (v->immediate <= p->global_count && p->globals[v->immediate-1].type == v->type && !p->globals[v->immediate-1].constant); break;
             case ATRI_IR_NOP: case ATRI_IR_LABEL: case ATRI_IR_JUMP: case ATRI_IR_UNREACHABLE: break;
-            case ATRI_IR_ZERO: valid = atri_ir_is_struct(v->type); break;
+            case ATRI_IR_ZERO: valid = atri_ir_is_aggregate(v->type); break;
+            case ATRI_IR_INDEX: {
+                AtriIRType input = v->left < i ? f->instructions[v->left].type : ATRI_IR_INVALID;
+                AtriIRType base = atri_ir_is_pointer(input) ? atri_ir_pointee(input) : input;
+                valid = available(&c, i, v->left) && atri_ir_is_array(base) && atri_ir_valid_type(p, base) &&
+                    (f->instructions[v->left].kind == ATRI_IR_LOCAL || f->instructions[v->left].kind == ATRI_IR_FIELD ||
+                     f->instructions[v->left].kind == ATRI_IR_INDEX || atri_ir_has_value(f->instructions[v->left].kind)) &&
+                    (!atri_ir_is_pointer(input) || operand(&c, i, v->left, input)) &&
+                    p->arrays[base-ATRI_IR_ARRAY].element == v->type &&
+                    (operand(&c, i, v->right, ATRI_IR_I32) || operand(&c, i, v->right, ATRI_IR_I64));
+                break;
+            }
             case ATRI_IR_FIELD: {
                 AtriIRType base = v->left < i ? f->instructions[v->left].type : ATRI_IR_INVALID;
                 if (atri_ir_is_pointer(base)) { base = atri_ir_pointee(base); }
                 valid = available(&c, i, v->left) && atri_ir_is_struct(base) && atri_ir_valid_type(p, base) &&
-                    (f->instructions[v->left].kind == ATRI_IR_LOCAL || f->instructions[v->left].kind == ATRI_IR_FIELD || atri_ir_has_value(f->instructions[v->left].kind));
+                    (f->instructions[v->left].kind == ATRI_IR_LOCAL || f->instructions[v->left].kind == ATRI_IR_FIELD || f->instructions[v->left].kind == ATRI_IR_INDEX || atri_ir_has_value(f->instructions[v->left].kind));
                 if (valid) {
                     const AtriIRStruct *t = &p->structs[base-ATRI_IR_STRUCT];
                     valid = v->immediate >= t->first_field && v->immediate-t->first_field < t->field_count && p->fields[v->immediate].type == v->type;
@@ -150,7 +161,7 @@ static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, Atr
                 break;
             }
             case ATRI_IR_CONST:
-                valid = !atri_ir_is_struct(v->type) && !(v->type == ATRI_IR_I32 && v->immediate > UINT32_MAX) &&
+                valid = !atri_ir_is_aggregate(v->type) && !(v->type == ATRI_IR_U8 && v->immediate > UINT8_MAX) && !(v->type == ATRI_IR_I32 && v->immediate > UINT32_MAX) &&
                     !(v->type == ATRI_IR_BOOL && v->immediate > 1) &&
                     !(atri_ir_is_pointer(v->type) && v->immediate != 0); break;
             case ATRI_IR_STRING:
@@ -174,7 +185,7 @@ static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, Atr
             }
             case ATRI_IR_ADDRESS:
                 valid = atri_ir_is_pointer(v->type) && available(&c, i, v->left) &&
-                    (f->instructions[v->left].kind == ATRI_IR_LOCAL || f->instructions[v->left].kind == ATRI_IR_FIELD) &&
+                    (f->instructions[v->left].kind == ATRI_IR_LOCAL || f->instructions[v->left].kind == ATRI_IR_FIELD || f->instructions[v->left].kind == ATRI_IR_INDEX) &&
                     f->instructions[v->left].type == atri_ir_pointee(v->type); break;
             case ATRI_IR_LOAD: valid = location(&c, i, v->left, v->type); break;
             case ATRI_IR_STORE: valid = location(&c, i, v->left, v->type) && operand(&c, i, v->right, v->type); break;
@@ -204,6 +215,17 @@ done:
 bool atri_ir_verify(const AtriIRProgram *p, AtriDiagnostic *d) {
     *d = (AtriDiagnostic){0};
     if ((p->struct_count && !p->structs) || (p->field_count && !p->fields)) { return bad(d, (AtriSpan){0}, "IR verifier: missing struct layout"); }
+    if (p->array_count && !p->arrays) { return bad(d, (AtriSpan){0}, "IR verifier: missing array types"); }
+    for (size_t i = 0; i < p->array_count; ++i) {
+        const AtriIRArray *a = &p->arrays[i];
+        if (!atri_ir_valid_type(p, a->element) || a->length > 4096 ||
+            (atri_ir_is_array(a->element) && (size_t)(a->element-ATRI_IR_ARRAY) >= i)) {
+            return bad(d, (AtriSpan){0}, "IR verifier: invalid array element or length");
+        }
+        size_t size = atri_ir_type_size(p, a->element);
+        if (size && a->length > 4095/size) { return bad(d, (AtriSpan){0}, "IR verifier: array size exceeds prototype limit"); }
+    }
+
     for (size_t i = 0; i < p->struct_count; ++i) {
         const AtriIRStruct *t = &p->structs[i];
         if (t->size >= 4096 || !t->alignment || (t->alignment & (t->alignment-1)) || t->alignment > 8 || t->size % t->alignment ||
@@ -231,7 +253,7 @@ bool atri_ir_verify(const AtriIRProgram *p, AtriDiagnostic *d) {
     if (p->global_count && !p->globals) { return bad(d, (AtriSpan){0}, "IR verifier: missing globals"); }
     for (size_t i = 0; i < p->global_count; ++i) {
         const AtriIRGlobal *g = &p->globals[i];
-        if (!atri_ir_valid_type(p, g->type) || atri_ir_is_struct(g->type) || (g->type == ATRI_IR_I32 && g->bits > UINT32_MAX) ||
+        if (!atri_ir_valid_type(p, g->type) || atri_ir_is_aggregate(g->type) || (g->type == ATRI_IR_U8 && g->bits > UINT8_MAX) || (g->type == ATRI_IR_I32 && g->bits > UINT32_MAX) ||
             (g->type == ATRI_IR_BOOL && g->bits > 1) || (atri_ir_is_pointer(g->type) && g->bits != 0)) {
             return bad(d, g->name, "IR verifier: invalid global initial value");
         }
