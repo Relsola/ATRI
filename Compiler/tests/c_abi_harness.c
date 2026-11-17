@@ -38,19 +38,19 @@ int main(void) {
     EXPECT_EQ(9, atri_test_observe_c_write(&object));
     EXPECT_EQ(51, object);
     EXPECT_PTR_EQ(c_storage, atri_test_from_c());
-    EXPECT_PTR_EQ(c_storage, atri_test_round_trip(c_storage));
+    EXPECT_PTR_EQ(c_storage, atri_test_round_trip((uint8_t *)c_storage));
     EXPECT_PTR_EQ(NULL, atri_test_round_trip(NULL));
     EXPECT_TRUE(atri_test_negate_c_bool(0));
     EXPECT_FALSE(atri_test_negate_c_bool(-7));
-    EXPECT_EQ(0, strcmp(atri_test_static_text(), "static text"));
-    EXPECT_PTR_EQ(c_storage + 3, atri_test_char_offset(c_storage, 3));
-    EXPECT_PTR_EQ(c_storage, atri_test_char_offset(c_storage + 3, -3));
-    EXPECT_PTR_EQ(c_storage + 5, atri_test_char_offset32(c_storage, 5));
-    EXPECT_PTR_EQ(c_storage, atri_test_char_offset32(c_storage + 5, -5));
-    EXPECT_EQ(5, atri_test_char_distance(c_storage + 5, c_storage));
-    EXPECT_EQ(-5, atri_test_char_distance(c_storage, c_storage + 5));
+    EXPECT_EQ(0, strcmp((const char *)atri_test_static_text(), "static text"));
+    EXPECT_PTR_EQ(c_storage + 3, atri_test_char_offset((uint8_t *)c_storage, 3));
+    EXPECT_PTR_EQ(c_storage, atri_test_char_offset((uint8_t *)c_storage + 3, -3));
+    EXPECT_PTR_EQ(c_storage + 5, atri_test_char_offset32((uint8_t *)c_storage, 5));
+    EXPECT_PTR_EQ(c_storage, atri_test_char_offset32((uint8_t *)c_storage + 5, -5));
+    EXPECT_EQ(5, atri_test_char_distance((uint8_t *)c_storage + 5, (uint8_t *)c_storage));
+    EXPECT_EQ(-5, atri_test_char_distance((uint8_t *)c_storage, (uint8_t *)c_storage + 5));
     EXPECT_PTR_EQ(NULL, atri_test_default_char_null());
     EXPECT_PTR_EQ(NULL, atri_test_choose_text(false));
-    EXPECT_EQ(0, strcmp(atri_test_choose_text(true), "chosen"));
+    EXPECT_EQ(0, strcmp((const char *)atri_test_choose_text(true), "chosen"));
     return 0;
 }

@@ -4,7 +4,7 @@ struct SelfSize { bytes: [sizeof(*SelfSize)]u8; }
 count: u64 := sizeof(Packet) + alignof(Packet);
 maximum: u64 = 18446744073709551615;
 
-[[extern(C)]] fn c_unsigned(a: u64, b: u64, c: u64, d: u64, e: u64) -> u64;
+#extern(C) fn c_unsigned(a: u64, b: u64, c: u64, d: u64, e: u64) -> u64;
 fn widen_signed(a: i32) -> i64 { return cast(i64, a); }
 fn signed_to_unsigned(a: i32) -> u64 { return cast(u64, a); }
 fn widen_byte(a: u8) -> u64 { return cast(u64, a); }
@@ -39,7 +39,7 @@ fn use_layout() -> i32 {
     index: u64 = 1;
     if (sizeof(Packet) != 16 || alignof(Packet) != 8 || sizeof(SelfSize) != 8) { return 1; }
     if (sizeof([0]u64) != 0 || alignof([0]u64) != 8) { return 2; }
-    if (sizeof([2]Packet) != 32 || alignof(*char) != 8 || sizeof(bool) != 1) { return 3; }
+    if (sizeof([2]Packet) != 32 || alignof(*u8) != 8 || sizeof(bool) != 1) { return 3; }
     bytes[count - 1] = cast(u8, data[index]);
     if (bytes[23] != 0 || wrapped[1] != 6 || data[0] != maximum) { return 4; }
     maximum = maximum + 2;

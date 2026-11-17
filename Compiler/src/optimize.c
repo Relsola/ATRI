@@ -4,9 +4,11 @@
 static bool diagnostic(AtriDiagnostic *d, AtriSpan span, const char *message) {
     *d = (AtriDiagnostic){span, message}; return false;
 }
-static bool emit_fold(AtriIRFunction *out, AtriIRInst inst, AtriId *id, AtriDiagnostic *d) {
+static bool emit_fold(const AtriIRProgram *p, AtriIRFunction *out, AtriIRInst inst, AtriId *id, AtriDiagnostic *d) {
     if (inst.kind == ATRI_IR_C_PROMOTE && out->instructions[inst.left].kind == ATRI_IR_CONST) {
-        inst.immediate = out->instructions[inst.left].immediate; inst.kind = ATRI_IR_CONST;
+        inst.immediate = out->instructions[inst.left].type == ATRI_IR_BOOL ? out->instructions[inst.left].immediate :
+            atri_integer_convert(out->instructions[inst.left].type, ATRI_IR_I32, out->instructions[inst.left].immediate);
+        inst.kind = ATRI_IR_CONST;
     }
     if (inst.kind == ATRI_IR_CAST && atri_ir_is_integer(inst.type) && out->instructions[inst.left].kind == ATRI_IR_CONST) {
         inst.immediate = atri_integer_convert(out->instructions[inst.left].type, inst.type, out->instructions[inst.left].immediate);
@@ -21,9 +23,9 @@ static bool emit_fold(AtriIRFunction *out, AtriIRInst inst, AtriId *id, AtriDiag
     if (inst.kind == ATRI_IR_PTR_OFFSET) {
         const AtriIRInst *offset = &out->instructions[inst.right];
         if (offset->kind == ATRI_IR_CONST) {
-            int64_t n = offset->type == ATRI_IR_I32 ? atri_i32_signed((uint32_t)offset->immediate) : atri_i64_signed(offset->immediate);
-            int64_t stride = (inst.type == ATRI_IR_PTR_CHAR || inst.type == ATRI_IR_PTR_U8) ? 1 : 4;
-            if (n < INT64_MIN / stride || n > INT64_MAX / stride) {
+            int64_t count = atri_integer_signed(offset->type, offset->immediate);
+            int64_t stride = (int64_t)atri_ir_type_size(p, atri_ir_pointee(inst.type));
+            if (count < INT64_MIN/stride || count > INT64_MAX/stride) {
                 return diagnostic(d, inst.span, "pointer byte offset exceeds the signed 64-bit range");
             }
         }
@@ -34,6 +36,9 @@ static bool emit_fold(AtriIRFunction *out, AtriIRInst inst, AtriId *id, AtriDiag
         if (inst.kind == ATRI_IR_BINARY && (inst.op == ATRI_DIV || inst.op == ATRI_REM) &&
             b->kind == ATRI_IR_CONST && b->immediate == 0)
             return diagnostic(d, inst.span, "integer division or remainder by zero");
+        if ((inst.op == ATRI_SHL || inst.op == ATRI_SHR) && b->kind == ATRI_IR_CONST && b->immediate >= atri_integer_width(inst.type)) {
+            return diagnostic(d, inst.span, "shift count is outside the operand width");
+        }
         if (a->kind == ATRI_IR_CONST && b->kind == ATRI_IR_CONST) {
             uint64_t value;
             if (inst.op == ATRI_NOT) value = !a->immediate;
@@ -58,7 +63,7 @@ static bool is_leaf(const AtriIRFunction *f) {
     }
     return active <= 64 && f->instruction_count <= 4096;
 }
-static bool inline_leaf(AtriIRFunction *out, const AtriIRFunction *callee,
+static bool inline_leaf(const AtriIRProgram *p, AtriIRFunction *out, const AtriIRFunction *callee,
                         const AtriId *arguments, AtriId *value, AtriDiagnostic *d) {
     /* 克隆时重新分配指令 ID；map 把被调函数的参数/旧值映射到调用者的实参/新值。 */
     AtriId *map = malloc(callee->instruction_count * sizeof(*map));
@@ -74,7 +79,7 @@ static bool inline_leaf(AtriIRFunction *out, const AtriIRFunction *callee,
             inst.left = map[inst.left]; inst.right = map[inst.right];
         }
         if (inst.kind == ATRI_IR_UNARY || inst.kind == ATRI_IR_CAST || inst.kind == ATRI_IR_C_PROMOTE) inst.left = map[inst.left];
-        if (!emit_fold(out, inst, &map[i], d)) { ok = false; break; }
+        if (!emit_fold(p, out, inst, &map[i], d)) { ok = false; break; }
     }
     free(map); return ok;
 }
@@ -133,17 +138,17 @@ bool atri_optimize(AtriIRProgram *p, bool inline_functions, AtriDiagnostic *d) {
                     if (inst.argument_count != 0 && args == NULL) { ok = diagnostic(d, inst.span, "out of memory"); break; }
                     for (size_t a = 0; a < inst.argument_count; ++a) args[a] = map[old->arguments[inst.first_argument + a]];
                     if (inline_functions && inst.callee != n && out.instruction_count < 4096 && is_leaf(&p->functions[inst.callee])) {
-                        ok = inline_leaf(&out, &p->functions[inst.callee], args, &map[i], d);
+                        ok = inline_leaf(p, &out, &p->functions[inst.callee], args, &map[i], d);
                         changed = true;
                     } else {
                         inst.first_argument = out.argument_count;
                         for (size_t a = 0; a < inst.argument_count; ++a)
                             if (!atri_append((void **)&out.arguments, &out.argument_count,
                                               &out.argument_capacity, sizeof(args[a]), &args[a])) { ok = diagnostic(d, inst.span, "out of memory"); break; }
-                        if (ok) ok = emit_fold(&out, inst, &map[i], d);
+                        if (ok) ok = emit_fold(p, &out, inst, &map[i], d);
                     }
                     free(args);
-                } else ok = emit_fold(&out, inst, &map[i], d);
+                } else ok = emit_fold(p, &out, inst, &map[i], d);
                 if (!ok) break;
             }
             free(map);

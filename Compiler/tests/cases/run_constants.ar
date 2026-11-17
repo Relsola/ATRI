@@ -1,0 +1,6 @@
+fn max(a: i32, b: i32) -> i32 { return a > b ? a : b; }
+#run max(10, 20);
+fn compile_only() -> void { count: i32; while (count < 3) { count += 1; } }
+#run compile_only();
+a: i32 := #run max(1, 2);
+fn main() -> i32 { #run compile_only(); return a; }

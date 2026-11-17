@@ -1,0 +1,38 @@
+// 语法讨论草稿。可运行的枚举与 switch 示例见同目录 enum_switch.ar。
+// 默认操作系统基础类型（i32），从0开始递增
+E1 :: enum {
+    Red,
+    Green,
+    Blue,
+}
+
+// 显示指定类型
+E2 :: enum(u8) {
+    Red,
+    Green,
+    Blue,
+}
+
+// 位枚举，超过标志位报错
+E3 :: enum(bit8) {
+    Red,   // 00001
+    Green, // 00010
+    Blue,  // 00100
+}
+
+fn main() -> i32 {
+
+    switch(E1) {
+        case E1::Red :
+         // ...
+        case E2::Green :
+         // ...
+         # through
+        case #run expr :
+         // 编译期求值常量 expr
+        default:
+         // ...
+    }
+
+    return 0;
+}

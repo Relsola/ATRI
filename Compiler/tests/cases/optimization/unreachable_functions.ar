@@ -1,4 +1,4 @@
-[[extern(C)]]
+#extern(C)
 fn missing_dead_dependency() -> i32;
 
 fn dead_entry() -> i32 {

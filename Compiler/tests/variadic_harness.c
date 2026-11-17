@@ -61,8 +61,8 @@ int main(int argc, char **argv) {
     EXPECT_TRUE(file != NULL);
     for (size_t i = 0; i < 257; ++i) { EXPECT_TRUE(fputc((unsigned char)i, file) != EOF); }
     EXPECT_EQ(0, fclose(file));
-    EXPECT_EQ(0, atri_test_check_file(argv[1], argv[2]));
-    EXPECT_EQ(0, atri_test_check_write(argv[1]));
+    EXPECT_EQ(0, atri_test_check_file((uint8_t *)argv[1], (uint8_t *)argv[2]));
+    EXPECT_EQ(0, atri_test_check_write((uint8_t *)argv[1]));
     file = fopen(argv[1], "rb"); EXPECT_TRUE(file != NULL);
     const unsigned char expected[] = {0, 128, 255, 10};
     for (size_t i = 0; i < sizeof(expected); ++i) { EXPECT_EQ(expected[i], fgetc(file)); }

@@ -25,8 +25,8 @@ fn nested(v: Nested) -> Nested {
     result.big.c = 77;
     return result;
 }
-[[extern(C)]] fn c_change(v: Big, n: i32, wide: i64, pair: Pair, pointer: *i32, flag: bool) -> Big;
-[[extern(C)]] fn c_independent(a: Big, b: Big) -> i64;
+#extern(C) fn c_change(v: Big, n: i32, wide: i64, pair: Pair, pointer: *i32, flag: bool) -> Big;
+#extern(C) fn c_independent(a: Big, b: Big) -> i64;
 fn independent(v: Big) -> i64 { return c_independent(v, v); }
 fn call_c() -> i32 {
     value: Big = {.a = 1, .b = 2, .c = 3};

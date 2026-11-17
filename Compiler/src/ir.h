@@ -4,8 +4,12 @@
 #include <stdint.h>
 
 /* 类型描述 IR 值；LOCAL/FIELD/INDEX 例外，type 描述存储内容，本身不能作为普通值或指针使用。 */
-typedef enum { ATRI_IR_I32, ATRI_IR_I64, ATRI_IR_PTR_I32, ATRI_IR_BOOL, ATRI_IR_PTR_CHAR, ATRI_IR_INVALID,
-    ATRI_IR_U8, ATRI_IR_PTR_U8, ATRI_IR_U64, ATRI_IR_VOID, ATRI_IR_PTR_VOID, ATRI_IR_STRUCT = 256, ATRI_IR_ARRAY = 524288, ATRI_IR_PTR_STRUCT = 1048576 } AtriIRType;
+typedef enum { ATRI_IR_I32, ATRI_IR_I64, ATRI_IR_PTR_I32, ATRI_IR_BOOL, ATRI_IR_INVALID,
+    ATRI_IR_U8, ATRI_IR_PTR_U8, ATRI_IR_U64, ATRI_IR_VOID, ATRI_IR_PTR_VOID,
+    ATRI_IR_I8, ATRI_IR_I16, ATRI_IR_U16, ATRI_IR_U32,
+    ATRI_IR_PTR_I8, ATRI_IR_PTR_I16, ATRI_IR_PTR_U16, ATRI_IR_PTR_U32,
+    ATRI_IR_PTR_I64, ATRI_IR_PTR_U64, ATRI_IR_PTR_BOOL,
+    ATRI_IR_STRUCT = 256, ATRI_IR_ARRAY = 524288, ATRI_IR_PTR_STRUCT = 1048576 } AtriIRType;
 typedef enum {
     ATRI_IR_NOP, ATRI_IR_PARAM, ATRI_IR_CONST, ATRI_IR_UNARY,
     ATRI_IR_BINARY, ATRI_IR_CALL, ATRI_IR_RETURN,
@@ -54,12 +58,31 @@ typedef struct {
     unsigned char *bytes;
     size_t length; /* 不含额外的终止零字节；数据由 IRProgram 拥有，可包含内嵌零。 */
 } AtriIRString;
-typedef struct { AtriSpan name; AtriIRType type; uint64_t bits; bool constant; } AtriIRGlobal;
+typedef struct {
+    AtriSpan name;
+    AtriIRType type;
+    uint64_t bits;
+    bool constant;
+    unsigned char *data; /* struct/union 初始对象表示，由 Global 拥有；标量仍使用 bits。 */
+    size_t data_size;
+} AtriIRGlobal;
 
 typedef struct { AtriSpan name; AtriIRType type; size_t offset; uint64_t default_bits; } AtriIRField;
-typedef struct { AtriSpan name; size_t first_field, field_count, size, alignment; unsigned state; bool opaque; } AtriIRStruct;
+typedef struct { AtriSpan name; size_t first_field, field_count, size, alignment; unsigned state; bool opaque, is_union; } AtriIRStruct;
 typedef struct { AtriIRType element; size_t length; } AtriIRArray;
+typedef struct { AtriSpan name; uint64_t bits; bool ready; } AtriIREnumVariant;
 typedef struct {
+    AtriSpan name;
+    AtriIRType underlying;
+    size_t first_variant, variant_count;
+    unsigned state;
+    bool flags;
+} AtriIREnum;
+typedef struct {
+    AtriIREnum *enums;
+    size_t enum_count;
+    AtriIREnumVariant *variants;
+    size_t variant_count;
     AtriIRArray *arrays;
     size_t array_count, array_capacity;
     AtriIRStruct *structs;
@@ -87,7 +110,7 @@ bool atri_emit_x64(FILE *stream, AtriSource source, const AtriIRProgram *program
                    AtriDiagnostic *diagnostic);
 int64_t atri_i32_signed(uint32_t bits);
 int64_t atri_i64_signed(uint64_t bits);
-bool atri_ir_is_struct(AtriIRType type);
+bool atri_ir_is_struct(AtriIRType type); /* 名义聚合 ID 区间，包含 struct/union；具体布局由 is_union 区分。 */
 bool atri_ir_is_array(AtriIRType type);
 bool atri_ir_is_aggregate(AtriIRType type);
 AtriIRType atri_ir_pointee(AtriIRType type);
@@ -98,6 +121,15 @@ bool atri_ir_valid_type(const AtriIRProgram *program, AtriIRType type);
 bool atri_type_from_source(AtriSource source, const AtriProgram *ast, AtriIRProgram *program, AtriSpan span, AtriIRType *type, AtriDiagnostic *diagnostic);
 bool atri_layout_structs(AtriSource source, const AtriProgram *ast, AtriIRProgram *program, AtriDiagnostic *diagnostic);
 bool atri_ir_is_integer(AtriIRType type);
+bool atri_enum_member(AtriSource source, const AtriProgram *ast, const AtriIRProgram *p, const AtriExpr *e,
+                      AtriIRType *type, uint64_t *bits);
+unsigned atri_integer_width(AtriIRType type);
+bool atri_integer_is_signed(AtriIRType type);
+uint64_t atri_integer_mask(AtriIRType type);
+uint64_t atri_integer_max(AtriIRType type);
+int64_t atri_integer_signed(AtriIRType type, uint64_t bits);
+bool atri_integer_literal(AtriSource source, AtriSpan text, uint64_t limit, uint64_t *out);
+AtriIRType atri_ir_builtin_type(const char *name, size_t length);
 bool atri_ir_is_pointer(AtriIRType type);
 bool atri_ir_has_value(AtriIRKind kind);
 bool atri_compare(AtriIRType type, AtriOp op, uint64_t a, uint64_t b);

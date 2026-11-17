@@ -1,0 +1,7 @@
+export struct State {
+    count: i32 = initial();
+    ready: bool = true;
+}
+export state: State = {.count = initial() + 1};
+fn initial() -> i32 { return 3; }
+export fn address() -> *State { return &state; }

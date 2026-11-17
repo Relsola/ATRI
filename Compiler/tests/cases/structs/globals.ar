@@ -1,0 +1,48 @@
+struct Inner {
+    count: i32 = default_count();
+    ready: bool = true;
+}
+struct Packet {
+    tag: u8 = 'A';
+    negative: i16 = -32768;
+    number: u32 = 0x89ab_cdef;
+    wide: u64 = 18446744073709551615;
+    inner: Inner;
+    bytes: [3]u8;
+    rows: [2]Inner;
+    link: *Packet;
+}
+struct Byte { value: u8 = 255; }
+
+defaults: Packet;
+configured: Packet = {
+    .rows = {{.count = 2}, {}},
+    .bytes = {1, 2},
+    .inner = {.count = 9},
+    .tag = 'B',
+    .link = null,
+};
+zeroed: Packet = {.wide = 0, .inner = {.count = 0, .ready = false}};
+tiny: Byte = {};
+seed: i32 := 7;
+guard: u64 = 0x0123_4567_89ab_cdef;
+
+fn default_count() -> i32 { return seed + 1; }
+fn defaults_address() -> *Packet { return &defaults; }
+fn configured_address() -> *Packet { return &configured; }
+fn zeroed_address() -> *Packet { return &zeroed; }
+fn tiny_address() -> *Byte { return &tiny; }
+fn count_address() -> *i32 { return &defaults.inner.count; }
+fn row_address() -> *Inner { return &defaults.rows[1]; }
+fn defaults_value() -> Packet { return defaults; }
+fn assign(value: Packet) -> Packet {
+    defaults = value;
+    return defaults;
+}
+fn count() -> i32 { return defaults.inner.count; }
+fn guard_value() -> u64 { return guard; }
+#extern(C) fn c_modify(value: *Packet) -> void;
+fn modify_from_c() -> i32 {
+    c_modify(&defaults);
+    return defaults.inner.count;
+}

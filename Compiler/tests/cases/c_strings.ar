@@ -1,6 +1,6 @@
-[[extern(C)]] fn puts(text: *char) -> i32;
+#extern(C) fn puts(text: *u8) -> i32;
 
-fn returned_literal() -> *char {
+fn returned_literal() -> *u8 {
     return "returned literal";
 }
 

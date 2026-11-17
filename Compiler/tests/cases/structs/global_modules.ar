@@ -1,0 +1,18 @@
+owner :: import "global_state";
+again :: import "./global_state";
+peer :: import "global_peer";
+state: owner::State;
+
+fn initial() -> i32 { return 99; }
+fn main() -> i32 {
+    if (state.count != 3 || !state.ready) { return 1; }
+    if (owner::state.count != 4 || !owner::state.ready) { return 2; }
+    if (peer::bump() != 6 || again::state.count != 6) { return 3; }
+    pointer: *owner::State = owner::address();
+    if (pointer != &again::state) { return 4; }
+    (*pointer).count = 9;
+    snapshot: owner::State = owner::state;
+    owner::state = state;
+    if (snapshot.count != 9 || again::state.count != 3) { return 5; }
+    return 0;
+}

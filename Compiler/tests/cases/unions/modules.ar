@@ -1,0 +1,13 @@
+owner :: import "exported";
+again :: import "./exported";
+
+fn main() -> i32 {
+    value: owner::Word = {.bits = 0xffff_ffff};
+    owner::shared = value;
+    if (again::shared.bytes[0] != 255) { return 1; }
+    pointer: *owner::Word = owner::address();
+    (*pointer).bytes[3] = 0;
+    if (owner::shared.bits != 0x00ff_ffff || value.bits != 0xffff_ffff) { return 2; }
+    if (pointer != &again::shared) { return 3; }
+    return 0;
+}

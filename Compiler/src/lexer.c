@@ -64,10 +64,10 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
         }
         size_t count = lexer->offset - start;
         AtriTokenKind kind = ATRI_TOKEN_IDENTIFIER;
-        if (count == 3 && memcmp(text + start, "run", 3) == 0) kind = ATRI_TOKEN_RUN;
         static const struct { const char *name; AtriTokenKind kind; } keywords[] = {
+            {"enum", ATRI_TOKEN_ENUM}, {"switch", ATRI_TOKEN_SWITCH}, {"case", ATRI_TOKEN_CASE}, {"default", ATRI_TOKEN_DEFAULT},
             {"cast", ATRI_TOKEN_CAST}, {"sizeof", ATRI_TOKEN_SIZEOF}, {"alignof", ATRI_TOKEN_ALIGNOF},
-            {"struct", ATRI_TOKEN_STRUCT}, {"import", ATRI_TOKEN_IMPORT}, {"export", ATRI_TOKEN_EXPORT}, {"fn", ATRI_TOKEN_FN}, {"return", ATRI_TOKEN_RETURN}, {"null", ATRI_TOKEN_NULL},
+            {"struct", ATRI_TOKEN_STRUCT}, {"union", ATRI_TOKEN_UNION}, {"import", ATRI_TOKEN_IMPORT}, {"export", ATRI_TOKEN_EXPORT}, {"fn", ATRI_TOKEN_FN}, {"return", ATRI_TOKEN_RETURN}, {"null", ATRI_TOKEN_NULL},
             {"true", ATRI_TOKEN_TRUE}, {"false", ATRI_TOKEN_FALSE},
             {"if", ATRI_TOKEN_IF}, {"else", ATRI_TOKEN_ELSE}, {"while", ATRI_TOKEN_WHILE},
             {"do", ATRI_TOKEN_DO}, {"for", ATRI_TOKEN_FOR}, {"loop", ATRI_TOKEN_LOOP},
@@ -81,35 +81,62 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
     }
 
     if (is_digit(c)) {
-        while (lexer->offset < length &&
-               is_digit((unsigned char)text[lexer->offset])) {
-            ++lexer->offset;
+        unsigned base = 10;
+        if (c == '0' && lexer->offset < length) {
+            unsigned char prefix = (unsigned char)text[lexer->offset];
+            if (prefix == 'x' || prefix == 'X') { base = 16; ++lexer->offset; }
+            else if (prefix == 'b' || prefix == 'B') { base = 2; ++lexer->offset; }
         }
-        if (lexer->offset + 1 < length && text[lexer->offset] == '.' && is_digit((unsigned char)text[lexer->offset+1])) {
+        bool digit_before = base == 10;
+        while (lexer->offset < length) {
+            unsigned char byte = (unsigned char)text[lexer->offset];
+            bool digit = base == 16 ? is_hex_digit(byte) : base == 2 ? byte == '0' || byte == '1' : is_digit(byte);
+            if (digit) { digit_before = true; ++lexer->offset; continue; }
+            if (byte == '_') {
+                if (!digit_before) { return error_token(lexer, start, diagnostic, "integer separator must occur between digits"); }
+                digit_before = false; ++lexer->offset; continue;
+            }
+            if (is_identifier_part(byte)) {
+                ++lexer->offset;
+                return error_token(lexer, start, diagnostic, "invalid integer digit or unsupported integer suffix");
+            }
+            break;
+        }
+        if (!digit_before) { return error_token(lexer, start, diagnostic, "integer requires digits with separators only between digits"); }
+        if (base == 10 && lexer->offset + 1 < length && text[lexer->offset] == '.' && is_digit((unsigned char)text[lexer->offset+1])) {
             ++lexer->offset;
             while (lexer->offset < length && is_digit((unsigned char)text[lexer->offset])) { ++lexer->offset; }
             return error_token(lexer, start, diagnostic, "floating-point literals are not supported yet");
-        }
-        if (lexer->offset < length &&
-            is_identifier_start((unsigned char)text[lexer->offset])) {
-            while (lexer->offset < length &&
-                   is_identifier_part((unsigned char)text[lexer->offset])) {
-                ++lexer->offset;
-            }
-            return error_token(lexer, start, diagnostic,
-                "only decimal integer literals without suffixes or separators "
-                "are supported by this parser subset");
         }
         return token(ATRI_TOKEN_INTEGER, start, lexer->offset);
     }
 
     switch (c) {
-        case '"':
+        case '#': {
+            while (lexer->offset < length && is_space((unsigned char)text[lexer->offset])) { ++lexer->offset; }
+            size_t name = lexer->offset;
+            while (lexer->offset < length && is_identifier_part((unsigned char)text[lexer->offset])) { ++lexer->offset; }
+            size_t count = lexer->offset-name;
+            static const struct { const char *name; AtriTokenKind kind; } directives[] = {
+                {"run", ATRI_TOKEN_RUN}, {"extern", ATRI_TOKEN_EXTERN}, {"through", ATRI_TOKEN_THROUGH}
+            };
+            for (size_t i = 0; i < sizeof(directives)/sizeof(*directives); ++i) {
+                if (count == strlen(directives[i].name) && !memcmp(text+name, directives[i].name, count)) {
+                    return token(directives[i].kind, start, lexer->offset);
+                }
+            }
+            return error_token(lexer, start, diagnostic, "unknown compiler directive after '#'");
+        }
+        case '\'': case '"': {
+            unsigned char quote = c;
+            size_t bytes = 0;
             while (lexer->offset < length) {
                 unsigned char byte = (unsigned char)text[lexer->offset++];
-                if (byte == '"') {
-                    return token(ATRI_TOKEN_STRING, start, lexer->offset);
+                if (byte == quote) {
+                    if (quote == '\'' && bytes != 1) { return error_token(lexer, start, diagnostic, "character literal requires exactly one decoded byte"); }
+                    return token(quote == '\'' ? ATRI_TOKEN_CHARACTER : ATRI_TOKEN_STRING, start, lexer->offset);
                 }
+                ++bytes;
                 if (byte == 0) {
                     return error_token(lexer, start, diagnostic, "NUL byte is not allowed in source text");
                 }
@@ -127,16 +154,17 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
                     return error_token(lexer, start, diagnostic, "NUL byte is not allowed in source text");
                 }
                 if (byte == 'x') {
-                    if (length - lexer->offset < 2 || !is_hex_digit((unsigned char)text[lexer->offset]) ||
+                    if (length-lexer->offset < 2 || !is_hex_digit((unsigned char)text[lexer->offset]) ||
                         !is_hex_digit((unsigned char)text[lexer->offset+1])) {
-                        return error_token(lexer, start, diagnostic, "string escape \\x requires exactly two hexadecimal digits");
+                        return error_token(lexer, start, diagnostic, "escape \\x requires exactly two hexadecimal digits");
                     }
                     lexer->offset += 2;
                 } else if (strchr("0nrtabfv\\\"'", byte) == NULL) {
-                    return error_token(lexer, start, diagnostic, "unsupported string escape");
+                    return error_token(lexer, start, diagnostic, "unsupported string escape; octal and binary escapes are not supported");
                 }
             }
-            return error_token(lexer, start, diagnostic, "unterminated string literal");
+            return error_token(lexer, start, diagnostic, "unterminated string or character literal");
+        }
         case '[':
             return token(ATRI_TOKEN_LEFT_BRACKET, start, lexer->offset);
         case ']':
@@ -173,29 +201,52 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
             }
             return token(ATRI_TOKEN_NOT, start, lexer->offset);
         case '<': case '>': {
+            if (lexer->offset < length && text[lexer->offset] == c) {
+                ++lexer->offset;
+                bool assign = lexer->offset < length && text[lexer->offset] == '=';
+                if (assign) { ++lexer->offset; }
+                return token(c == '<' ? (assign ? ATRI_TOKEN_SHL_ASSIGN : ATRI_TOKEN_SHL) :
+                    (assign ? ATRI_TOKEN_SHR_ASSIGN : ATRI_TOKEN_SHR), start, lexer->offset);
+            }
             bool equal = lexer->offset < length && text[lexer->offset] == '=';
-            if (equal) ++lexer->offset;
+            if (equal) { ++lexer->offset; }
             return token(c == '<' ? (equal ? ATRI_TOKEN_LE : ATRI_TOKEN_LT) :
-                                   (equal ? ATRI_TOKEN_GE : ATRI_TOKEN_GT), start, lexer->offset);
+                (equal ? ATRI_TOKEN_GE : ATRI_TOKEN_GT), start, lexer->offset);
         }
-        case '+': return token(ATRI_TOKEN_PLUS, start, lexer->offset);
-        case '*': return token(ATRI_TOKEN_STAR, start, lexer->offset);
-        case '/': return token(ATRI_TOKEN_SLASH, start, lexer->offset);
-        case '%': return token(ATRI_TOKEN_PERCENT, start, lexer->offset);
+        case '+': case '*': case '/': case '%': case '^': {
+            bool assign = lexer->offset < length && text[lexer->offset] == '=';
+            if (assign) { ++lexer->offset; }
+            AtriTokenKind kind = c == '+' ? (assign ? ATRI_TOKEN_ADD_ASSIGN : ATRI_TOKEN_PLUS) :
+                c == '*' ? (assign ? ATRI_TOKEN_MUL_ASSIGN : ATRI_TOKEN_STAR) :
+                c == '/' ? (assign ? ATRI_TOKEN_DIV_ASSIGN : ATRI_TOKEN_SLASH) :
+                c == '%' ? (assign ? ATRI_TOKEN_REM_ASSIGN : ATRI_TOKEN_PERCENT) :
+                (assign ? ATRI_TOKEN_XOR_ASSIGN : ATRI_TOKEN_CARET);
+            return token(kind, start, lexer->offset);
+        }
+        case '~': return token(ATRI_TOKEN_TILDE, start, lexer->offset);
         case '&':
             if (lexer->offset < length && text[lexer->offset] == '&') {
                 ++lexer->offset; return token(ATRI_TOKEN_AND, start, lexer->offset);
+            }
+            if (lexer->offset < length && text[lexer->offset] == '=') {
+                ++lexer->offset; return token(ATRI_TOKEN_AND_ASSIGN, start, lexer->offset);
             }
             return token(ATRI_TOKEN_AMPERSAND, start, lexer->offset);
         case '|':
             if (lexer->offset < length && text[lexer->offset] == '|') {
                 ++lexer->offset; return token(ATRI_TOKEN_OR, start, lexer->offset);
             }
-            break;
+            if (lexer->offset < length && text[lexer->offset] == '=') {
+                ++lexer->offset; return token(ATRI_TOKEN_OR_ASSIGN, start, lexer->offset);
+            }
+            return token(ATRI_TOKEN_PIPE, start, lexer->offset);
         case '-':
             if (lexer->offset < length && text[lexer->offset] == '>') {
                 ++lexer->offset;
                 return token(ATRI_TOKEN_ARROW, start, lexer->offset);
+            }
+            if (lexer->offset < length && text[lexer->offset] == '=') {
+                ++lexer->offset; return token(ATRI_TOKEN_SUB_ASSIGN, start, lexer->offset);
             }
             return token(ATRI_TOKEN_MINUS, start, lexer->offset);
         case 0:
@@ -212,4 +263,30 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
     }
     return error_token(lexer, start, diagnostic,
                       "unexpected character in this parser subset");
+}
+
+static unsigned hex_value(unsigned char c) {
+    return c <= '9' ? (unsigned)(c-'0') : c <= 'F' ? (unsigned)(c-'A'+10) : (unsigned)(c-'a'+10);
+}
+/* Lexer 已验证转义；按目标原始字节解码，不依赖宿主 char 的有符号性。 */
+unsigned char atri_literal_byte(AtriSource source, size_t *cursor) {
+    unsigned char byte = (unsigned char)source.text[(*cursor)++];
+    if (byte != '\\') { return byte; }
+    byte = (unsigned char)source.text[(*cursor)++];
+    switch (byte) {
+        case '0': return 0;
+        case 'n': return '\n';
+        case 'r': return '\r';
+        case 't': return '\t';
+        case 'a': return '\a';
+        case 'b': return '\b';
+        case 'f': return '\f';
+        case 'v': return '\v';
+        case 'x': {
+            unsigned high = hex_value((unsigned char)source.text[(*cursor)++]);
+            unsigned low = hex_value((unsigned char)source.text[(*cursor)++]);
+            return (unsigned char)(high*16+low);
+        }
+        default: return byte;
+    }
 }

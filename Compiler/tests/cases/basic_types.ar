@@ -1,0 +1,412 @@
+// 基础整数的动态参数用于验证真实机器运算和窄指针读写。
+
+fn add_i8(a: i8, b: i8) -> i8 {
+    return a + b;
+}
+fn divide_i8(a: i8, b: i8) -> i8 {
+    return a / b;
+}
+fn remainder_i8(a: i8, b: i8) -> i8 {
+    return a % b;
+}
+fn bits_i8(a: i8, b: i8, count: u64) -> i8 {
+    return ((~a) & b) ^ (a << count) | (b >> count);
+}
+fn write_i8(p: *i8, value: i8) -> i8 {
+    *p = value;
+    return *p;
+}
+fn step_i8(p: *i8, count: i64) -> *i8 {
+    cursor: *i8 = p;
+    cursor += count;
+    cursor -= 1;
+    return cursor;
+}
+fn distance_i8(p: *i8, q: *i8) -> i64 {
+    return p - q;
+}
+fn widen_i8(value: i8) -> u64 {
+    return cast(u64, value);
+}
+
+fn add_u8(a: u8, b: u8) -> u8 {
+    return a + b;
+}
+fn divide_u8(a: u8, b: u8) -> u8 {
+    return a / b;
+}
+fn remainder_u8(a: u8, b: u8) -> u8 {
+    return a % b;
+}
+fn bits_u8(a: u8, b: u8, count: u64) -> u8 {
+    return ((~a) & b) ^ (a << count) | (b >> count);
+}
+fn write_u8(p: *u8, value: u8) -> u8 {
+    *p = value;
+    return *p;
+}
+fn step_u8(p: *u8, count: i64) -> *u8 {
+    cursor: *u8 = p;
+    cursor += count;
+    cursor -= 1;
+    return cursor;
+}
+fn distance_u8(p: *u8, q: *u8) -> i64 {
+    return p - q;
+}
+fn widen_u8(value: u8) -> u64 {
+    return cast(u64, value);
+}
+
+fn add_i16(a: i16, b: i16) -> i16 {
+    return a + b;
+}
+fn divide_i16(a: i16, b: i16) -> i16 {
+    return a / b;
+}
+fn remainder_i16(a: i16, b: i16) -> i16 {
+    return a % b;
+}
+fn bits_i16(a: i16, b: i16, count: u64) -> i16 {
+    return ((~a) & b) ^ (a << count) | (b >> count);
+}
+fn write_i16(p: *i16, value: i16) -> i16 {
+    *p = value;
+    return *p;
+}
+fn step_i16(p: *i16, count: i64) -> *i16 {
+    cursor: *i16 = p;
+    cursor += count;
+    cursor -= 1;
+    return cursor;
+}
+fn distance_i16(p: *i16, q: *i16) -> i64 {
+    return p - q;
+}
+fn widen_i16(value: i16) -> u64 {
+    return cast(u64, value);
+}
+
+fn add_u16(a: u16, b: u16) -> u16 {
+    return a + b;
+}
+fn divide_u16(a: u16, b: u16) -> u16 {
+    return a / b;
+}
+fn remainder_u16(a: u16, b: u16) -> u16 {
+    return a % b;
+}
+fn bits_u16(a: u16, b: u16, count: u64) -> u16 {
+    return ((~a) & b) ^ (a << count) | (b >> count);
+}
+fn write_u16(p: *u16, value: u16) -> u16 {
+    *p = value;
+    return *p;
+}
+fn step_u16(p: *u16, count: i64) -> *u16 {
+    cursor: *u16 = p;
+    cursor += count;
+    cursor -= 1;
+    return cursor;
+}
+fn distance_u16(p: *u16, q: *u16) -> i64 {
+    return p - q;
+}
+fn widen_u16(value: u16) -> u64 {
+    return cast(u64, value);
+}
+
+fn add_i32(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+fn divide_i32(a: i32, b: i32) -> i32 {
+    return a / b;
+}
+fn remainder_i32(a: i32, b: i32) -> i32 {
+    return a % b;
+}
+fn bits_i32(a: i32, b: i32, count: u64) -> i32 {
+    return ((~a) & b) ^ (a << count) | (b >> count);
+}
+fn write_i32(p: *i32, value: i32) -> i32 {
+    *p = value;
+    return *p;
+}
+fn step_i32(p: *i32, count: i64) -> *i32 {
+    cursor: *i32 = p;
+    cursor += count;
+    cursor -= 1;
+    return cursor;
+}
+fn distance_i32(p: *i32, q: *i32) -> i64 {
+    return p - q;
+}
+fn widen_i32(value: i32) -> u64 {
+    return cast(u64, value);
+}
+
+fn add_u32(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+fn divide_u32(a: u32, b: u32) -> u32 {
+    return a / b;
+}
+fn remainder_u32(a: u32, b: u32) -> u32 {
+    return a % b;
+}
+fn bits_u32(a: u32, b: u32, count: u64) -> u32 {
+    return ((~a) & b) ^ (a << count) | (b >> count);
+}
+fn write_u32(p: *u32, value: u32) -> u32 {
+    *p = value;
+    return *p;
+}
+fn step_u32(p: *u32, count: i64) -> *u32 {
+    cursor: *u32 = p;
+    cursor += count;
+    cursor -= 1;
+    return cursor;
+}
+fn distance_u32(p: *u32, q: *u32) -> i64 {
+    return p - q;
+}
+fn widen_u32(value: u32) -> u64 {
+    return cast(u64, value);
+}
+
+fn add_i64(a: i64, b: i64) -> i64 {
+    return a + b;
+}
+fn divide_i64(a: i64, b: i64) -> i64 {
+    return a / b;
+}
+fn remainder_i64(a: i64, b: i64) -> i64 {
+    return a % b;
+}
+fn bits_i64(a: i64, b: i64, count: u64) -> i64 {
+    return ((~a) & b) ^ (a << count) | (b >> count);
+}
+fn write_i64(p: *i64, value: i64) -> i64 {
+    *p = value;
+    return *p;
+}
+fn step_i64(p: *i64, count: i64) -> *i64 {
+    cursor: *i64 = p;
+    cursor += count;
+    cursor -= 1;
+    return cursor;
+}
+fn distance_i64(p: *i64, q: *i64) -> i64 {
+    return p - q;
+}
+fn widen_i64(value: i64) -> u64 {
+    return cast(u64, value);
+}
+
+fn add_u64(a: u64, b: u64) -> u64 {
+    return a + b;
+}
+fn divide_u64(a: u64, b: u64) -> u64 {
+    return a / b;
+}
+fn remainder_u64(a: u64, b: u64) -> u64 {
+    return a % b;
+}
+fn bits_u64(a: u64, b: u64, count: u64) -> u64 {
+    return ((~a) & b) ^ (a << count) | (b >> count);
+}
+fn write_u64(p: *u64, value: u64) -> u64 {
+    *p = value;
+    return *p;
+}
+fn step_u64(p: *u64, count: i64) -> *u64 {
+    cursor: *u64 = p;
+    cursor += count;
+    cursor -= 1;
+    return cursor;
+}
+fn distance_u64(p: *u64, q: *u64) -> i64 {
+    return p - q;
+}
+fn widen_u64(value: u64) -> u64 {
+    return cast(u64, value);
+}
+
+struct Mixed {
+    character: u8 = 'A';
+    small: i8 = -128;
+    signed_short: i16 = -32768;
+    unsigned_short: u16 = 65535;
+    flag: bool = true;
+    unsigned_int: u32 = 4294967295;
+    signed_long: i64 = -1;
+    unsigned_long: u64 = 18446744073709551615;
+}
+#extern(C) fn c_mixed(value: Mixed) -> Mixed;
+#extern(C) fn c_narrow(a: i8, b: u16, c: i8, d: u32, e: i16, f: u64) -> i16;
+#extern(C) fn c_numbers(tag: i32, ...) -> i32;
+#extern(C) fn c_literal(text: *u8) -> i32;
+
+fn mixed_roundtrip(value: Mixed) -> Mixed {
+    return c_mixed(value);
+}
+fn mixed_defaults() -> Mixed {
+    value: Mixed;
+    return value;
+}
+fn narrow_stack(a: i8, b: u16, c: i8, d: u32, e: i16, f: u64) -> i16 {
+    return c_narrow(a, b, c, d, e, f);
+}
+fn call_variadic() -> i32 {
+    a: i8 = -128;
+    b: i16 = -32768;
+    c: u16 = 65535;
+    d: u32 = 4294967295;
+    ch: u8 = '\xff';
+    signed: i64 = -7;
+    unsigned: u64 = 18446744073709551615;
+    return c_numbers(8, a, b, c, d, ch, true, signed, unsigned);
+}
+fn write_char(p: *u8, value: u8) -> u8 {
+    *p = value;
+    return *p;
+}
+fn compare_char(a: u8, b: u8) -> bool {
+    return a < b;
+}
+fn char_number(value: u8) -> i32 {
+    return cast(i32, value);
+}
+fn write_bool(p: *bool, value: bool) -> bool {
+    *p = value;
+    return *p;
+}
+fn call_literal() -> i32 {
+    return c_literal("A\x42\x43\0tail\xff");
+}
+
+trace: i32;
+global_small: i8 = -128;
+global_short: i16 = -32768;
+global_unsigned_short: u16 = 65535;
+global_unsigned_int: u32 = 4294967295;
+global_char: u8 = 'Z';
+
+fn index_once() -> i32 {
+    trace = trace * 10 + 1;
+    return 0;
+}
+fn replace_old(p: *i32) -> i32 {
+    trace = trace * 10 + 2;
+    *p = 100;
+    return 3;
+}
+fn compound_order() -> i32 {
+    trace = 0;
+    data: [2]i32 = {7, 22};
+    data[index_once()] += replace_old(&data[0]);
+    if (trace != 12 || data[0] != 10 || data[1] != 22) { return 1; }
+    return 0;
+}
+fn all_compounds() -> i32 {
+    value: i16 = 3;
+    value += 2;
+    value -= 1;
+    value *= 7;
+    value /= 3;
+    value %= 5;
+    value |= 16;
+    value &= 31;
+    value ^= 3;
+    value <<= 2;
+    value >>= 1;
+    if (value != 46) { return 1; }
+    return 0;
+}
+fn arrays_and_globals() -> i32 {
+    a: [2]i8 = {-128, 127};
+    b: [2]i16 = {-32768, 32767};
+    c: [2]u16 = {65535, 0};
+    d: [2]u32 = {4294967295, 0};
+    text: [2]u8 = {'a', '\0'};
+    small_index: u8 = 1;
+    a[small_index] += 1;
+    b[small_index] += 1;
+    c[small_index] = c[0];
+    d[small_index] = d[0];
+    if (a[1] != -128 || b[1] != -32768 || c[1] != 65535 || d[1] != 4294967295) { return 1; }
+    if (text[0] != 'a' || *(&text[1]) != '\0') { return 2; }
+    if (global_small != -128 || global_short != -32768 || global_unsigned_short != 65535) { return 3; }
+    if (global_unsigned_int != 4294967295 || global_char != 'Z') { return 4; }
+    global_small += 1;
+    global_short += 1;
+    global_unsigned_short += 1;
+    global_unsigned_int += 1;
+    if (global_small != -127 || global_short != -32767 || global_unsigned_short != 0 || global_unsigned_int != 0) { return 5; }
+    return 0;
+}
+fn default_and_address() -> i32 {
+    a: i8;
+    b: i16;
+    c: u16;
+    d: u32;
+    e: i64;
+    f: u64;
+    g: bool;
+    ch: u8;
+    if (a != 0 || b != 0 || c != 0 || d != 0 || e != 0 || f != 0 || g || ch != '\0') { return 1; }
+    *(&a) = -7;
+    *(&b) = -300;
+    *(&c) = 60000;
+    *(&d) = 4000000000;
+    *(&e) = -5000000000;
+    *(&f) = 10000000000;
+    *(&g) = true;
+    *(&ch) = '\xff';
+    if (a != -7 || b != -300 || c != 60000 || d != 4000000000) { return 2; }
+    if (e != -5000000000 || f != 10000000000 || !g || ch != '\xff') { return 3; }
+    return 0;
+}
+
+fn narrow_i8(value: u64) -> i8 {
+    return cast(i8, value);
+}
+
+fn narrow_u8(value: u64) -> u8 {
+    return cast(u8, value);
+}
+
+fn narrow_i16(value: u64) -> i16 {
+    return cast(i16, value);
+}
+
+fn narrow_u16(value: u64) -> u16 {
+    return cast(u16, value);
+}
+
+fn narrow_i32(value: u64) -> i32 {
+    return cast(i32, value);
+}
+
+fn narrow_u32(value: u64) -> u32 {
+    return cast(u32, value);
+}
+
+fn narrow_i64(value: u64) -> i64 {
+    return cast(i64, value);
+}
+
+fn narrow_u64(value: u64) -> u64 {
+    return cast(u64, value);
+}
+
+fn byte_literal_index() -> i32 {
+    data: [2]u8 = {'x', 'y'};
+    if (data['b' - 'a'] != 'y' || data['a' - 'a'] != 'x') { return 1; }
+    data['b' - 'a'] -= 1;
+    if (data[1] != 'x' || 'a' - 0 != 97) { return 2; }
+    return 0;
+}
+fn fixed_hex_literal() -> *u8 {
+    return "\x41B\012";
+}

@@ -33,16 +33,17 @@ typedef size_t AtriId;
 #define ATRI_NONE ((AtriId)-1)
 typedef enum {
     ATRI_ADD, ATRI_SUB, ATRI_MUL, ATRI_DIV, ATRI_REM, ATRI_NEG,
-    ATRI_EQ, ATRI_NE, ATRI_LT, ATRI_LE, ATRI_GT, ATRI_GE, ATRI_AND, ATRI_OR, ATRI_NOT
+    ATRI_EQ, ATRI_NE, ATRI_LT, ATRI_LE, ATRI_GT, ATRI_GE, ATRI_AND, ATRI_OR, ATRI_NOT,
+    ATRI_BIT_AND, ATRI_BIT_OR, ATRI_BIT_XOR, ATRI_BIT_NOT, ATRI_SHL, ATRI_SHR
 } AtriOp;
 typedef enum {
-    ATRI_EXPR_INTEGER, ATRI_EXPR_NAME, ATRI_EXPR_UNARY, ATRI_EXPR_BINARY, ATRI_EXPR_CALL,
+    ATRI_EXPR_INTEGER, ATRI_EXPR_CHARACTER, ATRI_EXPR_NAME, ATRI_EXPR_UNARY, ATRI_EXPR_BINARY, ATRI_EXPR_CALL,
     ATRI_EXPR_ADDRESS, ATRI_EXPR_DEREFERENCE, ATRI_EXPR_NULL, ATRI_EXPR_BOOL, ATRI_EXPR_STRING, ATRI_EXPR_FIELD, ATRI_EXPR_INITIALIZER,
     ATRI_EXPR_INDEX, ATRI_EXPR_CONDITIONAL, ATRI_EXPR_RUN, ATRI_EXPR_CAST, ATRI_EXPR_SIZEOF, ATRI_EXPR_ALIGNOF
 } AtriExprKind;
 typedef struct {
     AtriExprKind kind;
-    AtriSpan span, text, qualifier;
+    AtriSpan span, text, qualifier, module;
     AtriOp op;
     AtriId left, right, alternative;
     size_t first_argument, argument_count;
@@ -52,14 +53,18 @@ typedef struct {
 typedef enum {
     ATRI_STMT_CONSTANT, ATRI_STMT_VARIABLE, ATRI_STMT_ASSIGN, ATRI_STMT_RETURN,
     ATRI_STMT_BLOCK, ATRI_STMT_IF, ATRI_STMT_WHILE, ATRI_STMT_DO,
-    ATRI_STMT_FOR, ATRI_STMT_LOOP, ATRI_STMT_BREAK, ATRI_STMT_CONTINUE, ATRI_STMT_EXPR
+    ATRI_STMT_FOR, ATRI_STMT_LOOP, ATRI_STMT_BREAK, ATRI_STMT_CONTINUE, ATRI_STMT_EXPR,
+    ATRI_STMT_SWITCH
 } AtriStmtKind;
 typedef struct {
     AtriStmtKind kind;
+    bool compound;
+    AtriOp op;
     AtriSpan span, name, type;
     AtriId expression;
     AtriId target;
     AtriId body, otherwise, initializer, step;
+    size_t first_case, case_count;
 } AtriStatement;
 typedef struct {
     AtriSpan span;
@@ -82,8 +87,12 @@ typedef struct {
 } AtriFunction;
 
 typedef struct { AtriSpan name, type; AtriId expression; } AtriField;
-typedef struct { AtriSpan name, span; size_t first_field, field_count; bool exported, opaque; } AtriStruct;
+/* struct/union 共用名义类型表；union 不增加有效成员标签或对象状态。 */
+typedef struct { AtriSpan name, span; size_t first_field, field_count; bool exported, opaque, is_union; } AtriStruct;
 typedef struct { AtriSpan name; AtriId expression; } AtriInitializer;
+typedef struct { AtriSpan name, span, underlying; size_t first_variant, variant_count; bool exported; } AtriEnum;
+typedef struct { AtriSpan name; AtriId expression; } AtriEnumVariant;
+typedef struct { AtriSpan span; AtriId expression, body; bool through; } AtriCase;
 typedef struct { AtriSpan name, path; AtriId target; } AtriImport;
 typedef struct { AtriStatement declaration; bool exported; } AtriGlobal;
 typedef struct { char *path; AtriSpan span; } AtriModule;
@@ -91,13 +100,21 @@ typedef struct {
     const char *text;
     size_t length;
     AtriId owner, target;
-    unsigned kind; /* 0 函数，1 全局，2 模块绑定，3 结构体。 */
+    unsigned kind; /* 0 函数，1 全局，2 模块绑定，3 struct/union，4 enum。 */
     bool exported;
     AtriSpan span;
 } AtriModuleSymbol;
 
 /* 节点以稳定 ID 互相引用，扩容不使引用失效；块的语句范围指向 block_statements 边数组。 */
 typedef struct {
+    AtriEnum *enums;
+    size_t enum_count;
+    AtriEnumVariant *variants;
+    size_t variant_count;
+    AtriCase *cases;
+    size_t case_count;
+    AtriId *runs;
+    size_t run_count;
     AtriArrayType *array_types;
     size_t array_type_count;
     AtriStruct *structs;
@@ -144,6 +161,7 @@ AtriId atri_module_at(const AtriProgram *program, size_t offset);
 AtriId atri_find_declaration(AtriSource source, const AtriProgram *program, size_t offset,
                              AtriSpan name, AtriSpan qualifier, bool *global);
 AtriId atri_find_struct(AtriSource source, const AtriProgram *program, size_t offset, AtriSpan name, AtriSpan qualifier);
+AtriId atri_find_enum(AtriSource source, const AtriProgram *program, size_t offset, AtriSpan name, AtriSpan qualifier);
 void atri_program_diagnostic(FILE *stream, AtriSource source, const AtriProgram *program, AtriDiagnostic diagnostic);
 void atri_program_destroy(AtriProgram *program);
 void atri_dump_ast(FILE *stream, AtriSource source,

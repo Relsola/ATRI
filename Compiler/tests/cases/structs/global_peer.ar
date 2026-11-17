@@ -1,0 +1,5 @@
+owner :: import "global_state";
+export fn bump() -> i32 {
+    owner::state.count += 2;
+    return owner::state.count;
+}

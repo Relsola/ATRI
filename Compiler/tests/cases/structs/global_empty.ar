@@ -1,0 +1,10 @@
+struct Empty {}
+struct Zero { items: [4096][4096]Empty; }
+empty: Empty = {};
+zero: Zero;
+fn empty_address() -> *Empty { return &empty; }
+fn main() -> i32 {
+    if (sizeof(Empty) != 0 || sizeof(Zero) != 0) { return 1; }
+    if (empty_address() != &empty || &zero == null) { return 2; }
+    return 0;
+}

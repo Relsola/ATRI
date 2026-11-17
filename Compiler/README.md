@@ -2,9 +2,9 @@
 
 Compiler 是 ATRI 大型个人项目的基础子项目，也是当前建设的第一步，目标是实现一门以 DOP（面向数据编程）为核心取向、偏底层的强类型语言及可持续自举的原生编译器。
 
-首个目标平台为 Windows x86-64，使用 C23 实现 Stage 0。目前已有 i32、i64、bool 与 `*i32` 的编译链路：Lexer/Parser/AST、名称/类型检查、整数/布尔编译期常量求值、IR 与 Verifier、传播/折叠、小函数内联及 x64 汇编输出。支持整数指针取地址、显式读写、参数/返回，以及按元素缩放的加减和 i64 元素距离；已支持 if/else、while、do...while、for、loop、break/continue、比较和短路逻辑，以及常量求值中的分支/循环/递归；已支持相对 .ar 多模块导入、函数/标量全局导出及共享全局存储；已实现结构体定义、字段默认值/指定初始化、复制和按值传参/返回；已补充固定数组、u8/*u8/u64、整数转换、sizeof/alignof、三元条件表达式及编译期 run 声明/标量表达式；union/enum、defer、run 代码块/AST 编译期系统和浮点运算等尚未实现。
+首个目标平台为 Windows x86-64，Stage 0 使用 C23 实现。从源码解析、类型检查、编译期求值和 IR 验证到 x64 汇编输出，当前支持八种定宽整数、bool、一层数据指针、整数枚举、固定数组、结构体和无标签 union。已支持相对 `.ar` 导入、共享全局存储、聚合静态初始化、循环、`switch` 和标量 `#run` 求值。`defer`、`#run` 代码块、编译期 AST 修改和浮点运算等尚待实现。
 
-已增加 C 兼容 `*char`、静态零结尾字符串字面量和 `[[extern(C)]]` 外部调用，可以通过 puts/printf 打印。已支持当前类型范围内的 C 可变参数调用，并用 void 返回、*void、opaque FILE 和数据指针 cast 接通文件读写。稳定 ABI 目标与 C 一致，内置 string 暂缓；完整范围和限制见[外部调用子集](NEXT/parser_subset_v0_1.md#c-字符串与外部调用)。
+已增加 C 兼容 `*u8`、静态零结尾字符串字面量和 `#extern(C)` 外部调用，可以通过 puts/printf 打印。已支持当前类型范围内的 C 可变参数调用，并用 void 返回、*void、opaque FILE 和数据指针 cast 接通文件读写。稳定 ABI 目标与 C 一致，内置 string 暂缓；完整范围和限制见[外部调用子集](NEXT/parser_subset_v0_1.md#c-字符串与外部调用)。
 
 ## 运行整数编译原型
 
@@ -25,7 +25,7 @@ clang .\build\main.s -o .\build\main.exe
 $LASTEXITCODE # 3
 ```
 
-普通变量写作 `a: i32 = 1;`，省略初始化器时默认零初始化；编译期常量写作 `n: i32 := add(1, 2);`，无法在编译期求值时必须报错。[常量示例](examples/constants.ar)在 -O0 下也直接返回 3，不依赖内联。全角分号 `；` 会报错。完整范围、暂用的 BD-06 候选规则和当前后端限制见[整数编译原型](NEXT/parser_subset_v0_1.md)。
+普通变量写作 `a: i32 = 1;`，省略初始化器时默认零初始化；编译期常量写作 `n: i32 := add(1, 2);`，无法在编译期求值时必须报错。[常量示例](examples/constants.ar)在 -O0 下也直接返回 3，不依赖内联。全角分号 `；` 会报错。完整范围、已接受的整数运算规则和当前后端限制见[整数编译原型](NEXT/parser_subset_v0_1.md)。
 
 打印示例见 [hello.ar](examples/hello.ar)：
 
@@ -38,11 +38,11 @@ clang .\build\hello.s -o .\build\hello.exe
 
 当前使用 Clang 默认 C 启动代码及运行库完成链接；编译器本身仍输出汇编，不自动执行链接器。`-o` 只指定文本输出文件名，不能直接生成 exe；指定 `.exe`（不区分大小写）会返回命令行错误且保留已有文件，必须先输出 `.s` 再使用 Clang 汇编/链接。`build.bat` 是不随仓库提交的本地试验脚本；上面的命令可直接用于构建示例。C 声明和字面量规则见[语言规范第 5.5/13 节](NEXT/language_spec_v0_1.md#13-c-互操作与执行环境)。
 
-数组写作 `data: [4]u8 = {1, 2};`，当前省略元素按类型默认初始化，支持索引、嵌套聚合和按值传参/返回。编译期示例见 [run_constants.ar](examples/run_constants.ar)：`run a: i32 := max(1, 2);` 在 -O0/-O1 下均生成常量 2，不执行运行期调用。数组长度、编译期结果及当前限制见[实现子集](NEXT/parser_subset_v0_1.md#固定数组的当前实现)。
+数组写作 `data: [4]u8 = {1, 2};`。省略的元素按类型默认初始化，支持索引、嵌套聚合和按值传参/返回。`a: i32 := #run max(1, 2);` 在 -O0/-O1 下均生成常量 2。`#run f();` 也可独立执行，详见[可执行回归用例](tests/cases/run_constants.ar)和[实现子集](NEXT/parser_subset_v0_1.md#固定数组的当前实现)。
 
 整数转换使用 `byte: u8 = cast(u8, rgba);`，显式缩窄保留低位，扩宽按源类型符号/零扩展。`sizeof(T)`、`alignof(T)` 返回 u64 编译期值，也可用于数组长度。例子见 [conversions.ar](examples/conversions.ar)，准确能力与限制见[整数转换与布局查询](NEXT/parser_subset_v0_1.md#整数转换与布局查询)。
 
-文件读取示例使用 [c_stdio.ar](examples/c_stdio.ar) 显式绑定 C 标准库：[read_file.ar](examples/read_file.ar) 分块读取并打印 examples/main.ar；[variadic.ar](examples/variadic.ar) 演示 `printf(format: *char, ...)`。从 Compiler 目录执行：
+文件读取示例使用 [c_stdio.ar](examples/c_stdio.ar) 显式绑定 C 标准库：[read_file.ar](examples/read_file.ar) 分块读取并打印 examples/main.ar；[variadic.ar](examples/variadic.ar) 演示 `printf(format: *u8, ...)`。从 Compiler 目录执行：
 
 ```powershell
 .\build\atri-cc.exe -S -o .\build\read_file.s .\examples\read_file.ar
@@ -50,9 +50,17 @@ clang .\build\read_file.s -o .\build\read_file.exe
 .\build\read_file.exe
 ```
 
-可变参数目前覆盖已支持整数、数据指针和 C 兼容普通结构体，u8/bool 尾参提升为 i32；浮点、va_list/va_arg 定义端及完整 C ABI 仍待实现。FILE 只作 opaque 指针使用，CRT 的分配、缓冲和 I/O 有实际成本，文件错误及关闭由调用方处理。准确边界见[实现子集](NEXT/parser_subset_v0_1.md#c-可变参数opaque-file-与文件读取)。
+可变参数目前覆盖已支持整数、数据指针和 C 兼容普通结构体，i8/u8/i16/u16/bool 尾参提升为 i32；浮点、va_list/va_arg 定义端及完整 C ABI 仍待实现。FILE 只作 opaque 指针使用，CRT 的分配、缓冲和 I/O 有实际成本，文件错误及关闭由调用方处理。准确边界见[实现子集](NEXT/parser_subset_v0_1.md#c-可变参数opaque-file-与文件读取)。
 
-编译期结果目前可通过 `--emit-ir-before-opt` 查看：输出已完成 run/常量求值、尚未应用可选优化的 IR；AST Dump 只展示解析结果。`run a: i32 = max(1, 2);`（等价于 `a: i32 = run (max(1, 2));`）的初始值在编译期求得，a 仍可在运行期赋值，区别于 `:=` 常量。求值记录与 AST 生成代码视图仍待实现，参数未定，不承诺统一的“预处理后源码”或可再次编译的源码导出；详见[编译期观察与调试](NEXT/language_spec_v0_1.md#125-编译期执行的观察与调试)。
+`--emit-ir-before-opt` 输出完成编译期求值后的 IR。`a: i32 = #run max(1, 2);` 的初值在编译期求得，`a` 仍可在运行期赋值。使用 `:=` 可建立编译期常量。求值记录及生成代码视图仍待设计，见[编译期观察与调试](NEXT/language_spec_v0_1.md#125-编译期执行的观察与调试)。
+
+基础整数支持十进制/二进制/十六进制与数字分隔符、位运算/移位和复合赋值，见 [basic_types.ar](examples/basic_types.ar)。不再提供 char：单引号字节字面量为 u8，可直接算术/索引；字符串字面量为 *u8 并补终止零。\xHH 固定两位，不解析八进制；C 互操作沿用最终字节表示，浮点和内置 string 继续暂缓。
+
+无标签 union 示例见 [union.ar](examples/union.ar)，使用 `union Word { bits: u32; bytes: [4]u8; }` 和 `{.bits = 0x12345678}`。成员按目标 C 自然布局共享存储，无隐含标签；支持成员读写、整体复制、按值调用和静态全局。默认/空初始化清零整个 union，成员声明默认值、匿名成员、位域和聚合编译期值暂未支持，准确边界见[实现子集](NEXT/parser_subset_v0_1.md#无标签-union-的当前实现)。
+
+枚举示例见 [enum_switch.ar](examples/enum_switch.ar)：`Color :: enum { Red, Green, Count, }` 默认使用 i32，成员是普通整数，`1 + Color::Red`、数组长度和索引可直接使用；`Flags :: enum(bit8)` 自动生成 1、2、4，变量/计算结果仍允许 0。switch 选择值只求值一次，case 常量在编译期求得，非空分支默认结束，`#through;` 显式进入下一分支；case 不强制花括号。
+
+编译器指定能力采用 `#run`、`#extern(C)` 和 `#through`。cast、sizeof、alignof 保持运算符写法。`#run { ... }` 和 `#run -> Type { ... }` 分别定义无结果块与显式 `return` 的值块，两种写法当前均诊断尚未实现。原始枚举草稿与可执行示例分别位于 [enum.ar](examples/enum.ar) 和 [enum_switch.ar](examples/enum_switch.ar)。
 
 ## 文档
 
@@ -85,7 +93,7 @@ clang .\build\read_file.s -o .\build\read_file.exe
 已审查确认：BD-16 的声明顺序、自然对齐、无聚合自动相等及首版布局边界接受；空结构体大小改为 0、对齐保持 1。零大小对象的地址、指针操作、分配与 FFI 配套继续审查。DOP 定位不自动增加专用 SoA/SIMD 语法或改变既有 C 布局。
 
 1. 整数环绕、cast 截断与非法运算边界（BD-06/07/25）。
-2. char 标量与只读指针接口（BD-04/05/13）；C 兼容字符指针已确认并实现，内置 string 整体暂缓。
+2. 字节字符与只读指针接口（BD-04/05/13）；u8 字节字符与 *u8 零结尾字面量已确认并实现，内置 string 整体暂缓。
 3. 编译期常量的聚合/地址边界、目标只读接口和按值复制（BD-10/11/12）。
 4. 原始指针的低层访问契约、数组完整类型/值语义、零大小对象配套、枚举有效零值及全局初始化限制（BD-14/15/16/17/24、ARRAY-01）；当前数组检查范围已确定，运行期检查后续探索。
 
@@ -101,4 +109,4 @@ clang build\struct.s -o build\struct.exe
 build\struct.exe
 ```
 
-成功退出码为 0。当前结构体边界及复制成本见[实现子集](NEXT/parser_subset_v0_1.md#结构体的当前实现)。
+成功退出码为 0。结构体普通全局支持默认/指定静态初始化，包含嵌套结构体和字段数组，示例见 [struct_globals.ar](examples/struct_globals.ar)。标量叶子在编译期求值，直接生成静态数据；指针初值限 null，聚合常量和聚合调用/复制初值暂未支持。当前结构体边界及复制成本见[实现子集](NEXT/parser_subset_v0_1.md#结构体的当前实现)。

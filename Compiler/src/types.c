@@ -8,10 +8,45 @@ bool atri_ir_is_struct(AtriIRType type) { return type >= ATRI_IR_STRUCT && type 
 bool atri_ir_is_array(AtriIRType type) { return type >= ATRI_IR_ARRAY && type < ATRI_IR_PTR_STRUCT; }
 bool atri_ir_is_aggregate(AtriIRType type) { return atri_ir_is_struct(type) || atri_ir_is_array(type); }
 AtriIRType atri_ir_pointee(AtriIRType type) {
-    return type == ATRI_IR_PTR_VOID ? ATRI_IR_VOID : type == ATRI_IR_PTR_U8 ? ATRI_IR_U8 : type == ATRI_IR_PTR_I32 ? ATRI_IR_I32 : type >= ATRI_IR_PTR_STRUCT ? (AtriIRType)(type-ATRI_IR_PTR_STRUCT+ATRI_IR_STRUCT) : ATRI_IR_INVALID;
+    switch (type) {
+        case ATRI_IR_PTR_VOID: return ATRI_IR_VOID;
+        case ATRI_IR_PTR_U8: return ATRI_IR_U8;
+        case ATRI_IR_PTR_I32: return ATRI_IR_I32;
+        case ATRI_IR_PTR_I8: return ATRI_IR_I8;
+        case ATRI_IR_PTR_I16: return ATRI_IR_I16;
+        case ATRI_IR_PTR_U16: return ATRI_IR_U16;
+        case ATRI_IR_PTR_U32: return ATRI_IR_U32;
+        case ATRI_IR_PTR_I64: return ATRI_IR_I64;
+        case ATRI_IR_PTR_U64: return ATRI_IR_U64;
+        case ATRI_IR_PTR_BOOL: return ATRI_IR_BOOL;
+        default: return type >= ATRI_IR_PTR_STRUCT ? (AtriIRType)(type-ATRI_IR_PTR_STRUCT+ATRI_IR_STRUCT) : ATRI_IR_INVALID;
+    }
 }
 AtriIRType atri_ir_pointer_type(AtriIRType type) {
-    return type == ATRI_IR_VOID ? ATRI_IR_PTR_VOID : type == ATRI_IR_U8 ? ATRI_IR_PTR_U8 : type == ATRI_IR_I32 ? ATRI_IR_PTR_I32 : atri_ir_is_aggregate(type) ? (AtriIRType)(type-ATRI_IR_STRUCT+ATRI_IR_PTR_STRUCT) : ATRI_IR_INVALID;
+    switch (type) {
+        case ATRI_IR_VOID: return ATRI_IR_PTR_VOID;
+        case ATRI_IR_U8: return ATRI_IR_PTR_U8;
+        case ATRI_IR_I32: return ATRI_IR_PTR_I32;
+        case ATRI_IR_I8: return ATRI_IR_PTR_I8;
+        case ATRI_IR_I16: return ATRI_IR_PTR_I16;
+        case ATRI_IR_U16: return ATRI_IR_PTR_U16;
+        case ATRI_IR_U32: return ATRI_IR_PTR_U32;
+        case ATRI_IR_I64: return ATRI_IR_PTR_I64;
+        case ATRI_IR_U64: return ATRI_IR_PTR_U64;
+        case ATRI_IR_BOOL: return ATRI_IR_PTR_BOOL;
+        default: return atri_ir_is_aggregate(type) ? (AtriIRType)(type-ATRI_IR_STRUCT+ATRI_IR_PTR_STRUCT) : ATRI_IR_INVALID;
+    }
+}
+AtriIRType atri_ir_builtin_type(const char *name, size_t length) {
+    static const struct { const char *name; AtriIRType type; } types[] = {
+        {"i8", ATRI_IR_I8}, {"i16", ATRI_IR_I16}, {"i32", ATRI_IR_I32}, {"i64", ATRI_IR_I64},
+        {"u8", ATRI_IR_U8}, {"u16", ATRI_IR_U16}, {"u32", ATRI_IR_U32}, {"u64", ATRI_IR_U64},
+        {"bool", ATRI_IR_BOOL}, {"void", ATRI_IR_VOID}
+    };
+    for (size_t i = 0; i < sizeof(types)/sizeof(types[0]); ++i) {
+        if (strlen(types[i].name) == length && !memcmp(name, types[i].name, length)) { return types[i].type; }
+    }
+    return ATRI_IR_INVALID;
 }
 bool atri_ir_valid_type(const AtriIRProgram *p, AtriIRType type) {
     if (atri_ir_is_struct(type)) { return (size_t)(type-ATRI_IR_STRUCT) < p->struct_count && !p->structs[type-ATRI_IR_STRUCT].opaque; }
@@ -20,7 +55,7 @@ bool atri_ir_valid_type(const AtriIRProgram *p, AtriIRType type) {
         AtriIRType target = atri_ir_pointee(type);
         return atri_ir_is_struct(target) ? (size_t)(target-ATRI_IR_STRUCT) < p->struct_count : atri_ir_is_array(target) && atri_ir_valid_type(p, target);
     }
-    return atri_ir_is_integer(type) || type == ATRI_IR_BOOL || type == ATRI_IR_PTR_I32 || type == ATRI_IR_PTR_CHAR || type == ATRI_IR_PTR_U8 || type == ATRI_IR_PTR_VOID;
+    return atri_ir_is_integer(type) || type == ATRI_IR_BOOL || atri_ir_is_pointer(type);
 }
 size_t atri_ir_type_size(const AtriIRProgram *p, AtriIRType type) {
     if (type == ATRI_IR_VOID) { return 0; }
@@ -29,20 +64,60 @@ size_t atri_ir_type_size(const AtriIRProgram *p, AtriIRType type) {
         const AtriIRArray *a = &p->arrays[type-ATRI_IR_ARRAY];
         return a->length * atri_ir_type_size(p, a->element);
     }
-    return type == ATRI_IR_BOOL || type == ATRI_IR_U8 ? 1 : type == ATRI_IR_I32 ? 4 : 8;
+    return type == ATRI_IR_BOOL ? 1 : atri_ir_is_integer(type) ? atri_integer_width(type)/8 : 8;
 }
 size_t atri_ir_type_align(const AtriIRProgram *p, AtriIRType type) {
     if (atri_ir_is_array(type)) { return atri_ir_type_align(p, p->arrays[type-ATRI_IR_ARRAY].element); }
     return atri_ir_is_struct(type) ? p->structs[type-ATRI_IR_STRUCT].alignment : atri_ir_type_size(p, type);
 }
 /* 布局阶段仅解释字面量与可见常量的整数运算；共享预算防止依赖图指数展开。 */
-static AtriIRType constant_type(AtriSource source, AtriSpan span) {
-    size_t n = span.end-span.start;
-    const char *name = source.text+span.start;
-    return n == 3 && !memcmp(name, "i32", 3) ? ATRI_IR_I32 :
-        n == 3 && !memcmp(name, "i64", 3) ? ATRI_IR_I64 :
-        n == 3 && !memcmp(name, "u64", 3) ? ATRI_IR_U64 :
-        n == 2 && !memcmp(name, "u8", 2) ? ATRI_IR_U8 : ATRI_IR_INVALID;
+static AtriIRType enum_storage(AtriSource source, AtriSpan span, bool *flags) {
+    *flags = false;
+    if (!span.end) { return ATRI_IR_I32; }
+    size_t length = span.end-span.start;
+    const char *text = source.text+span.start;
+    if (length >= 4 && !memcmp(text, "bit", 3)) {
+        *flags = true;
+        if (length == 4 && text[3] == '8') { return ATRI_IR_U8; }
+        if (length == 5 && !memcmp(text+3, "16", 2)) { return ATRI_IR_U16; }
+        if (length == 5 && !memcmp(text+3, "32", 2)) { return ATRI_IR_U32; }
+        if (length == 5 && !memcmp(text+3, "64", 2)) { return ATRI_IR_U64; }
+        return ATRI_IR_INVALID;
+    }
+    AtriIRType type = atri_ir_builtin_type(text, length);
+    return atri_ir_is_integer(type) ? type : ATRI_IR_INVALID;
+}
+static AtriId enum_of_member(AtriSource source, const AtriProgram *ast, const AtriExpr *e) {
+    return e->qualifier.end ? atri_find_enum(source, ast, e->span.start, e->qualifier, e->module) : ATRI_NONE;
+}
+bool atri_enum_member(AtriSource source, const AtriProgram *ast, const AtriIRProgram *p, const AtriExpr *e,
+                      AtriIRType *type, uint64_t *bits) {
+    AtriId id = enum_of_member(source, ast, e);
+    if (id == ATRI_NONE) { return false; }
+    const AtriIREnum *enumeration = &p->enums[id];
+    for (size_t i = 0; i < enumeration->variant_count; ++i) {
+        const AtriIREnumVariant *variant = &p->variants[enumeration->first_variant+i];
+        if (variant->ready && variant->name.end-variant->name.start == e->text.end-e->text.start &&
+            !memcmp(source.text+variant->name.start, source.text+e->text.start, e->text.end-e->text.start)) {
+            *type = enumeration->underlying; *bits = variant->bits; return true;
+        }
+    }
+    return false;
+}
+static bool layout_enum(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, size_t index, size_t depth, AtriDiagnostic *d);
+static AtriIRType constant_type(AtriSource source, const AtriProgram *ast, AtriSpan span) {
+    AtriIRType type = atri_ir_builtin_type(source.text+span.start, span.end-span.start);
+    if (type == ATRI_IR_INVALID) {
+        AtriLexer lexer = atri_lexer_create(source); lexer.offset = span.start;
+        AtriDiagnostic ignored;
+        AtriToken name = atri_lexer_next(&lexer, &ignored), next = atri_lexer_next(&lexer, &ignored);
+        AtriSpan qualifier = {0};
+        if (next.kind == ATRI_TOKEN_SCOPE) { qualifier = name.span; name = atri_lexer_next(&lexer, &ignored); }
+        AtriId id = atri_find_enum(source, ast, span.start, name.span, qualifier);
+        bool flags;
+        if (id != ATRI_NONE) { type = enum_storage(source, ast->enums[id].underlying, &flags); }
+    }
+    return atri_ir_is_integer(type) ? type : ATRI_IR_INVALID;
 }
 static bool name_matches(AtriSource source, AtriSpan a, AtriSpan b) {
     return a.end-a.start == b.end-b.start && !memcmp(source.text+a.start, source.text+b.start, a.end-a.start);
@@ -93,29 +168,27 @@ static AtriIRType length_type(AtriSource source, const AtriProgram *ast, AtriId 
     if (depth > 256 || !*steps) { return ATRI_IR_INVALID; }
     --*steps;
     const AtriExpr *e = &ast->expressions[id];
+    if (e->kind == ATRI_EXPR_CHARACTER) { return ATRI_IR_U8; }
     if (e->kind == ATRI_EXPR_SIZEOF || e->kind == ATRI_EXPR_ALIGNOF) { return ATRI_IR_U64; }
-    if (e->kind == ATRI_EXPR_CAST) { return constant_type(source, e->text); }
+    if (e->kind == ATRI_EXPR_CAST) { return constant_type(source, ast, e->text); }
     if (e->kind == ATRI_EXPR_NAME) {
+        AtriId id = enum_of_member(source, ast, e);
+        bool flags;
+        if (id != ATRI_NONE) { return enum_storage(source, ast->enums[id].underlying, &flags); }
         const AtriStatement *decl = length_constant(source, ast, e);
-        return decl ? constant_type(source, decl->type) : ATRI_IR_INVALID;
+        return decl ? constant_type(source, ast, decl->type) : ATRI_IR_INVALID;
     }
     if (e->kind == ATRI_EXPR_UNARY || e->kind == ATRI_EXPR_RUN) { return length_type(source, ast, e->left, depth+1, steps); }
     if (e->kind == ATRI_EXPR_BINARY) {
         AtriIRType a = length_type(source, ast, e->left, depth+1, steps);
         AtriIRType b = length_type(source, ast, e->right, depth+1, steps);
-        return a == ATRI_IR_U64 || b == ATRI_IR_U64 ? ATRI_IR_U64 : a == ATRI_IR_I64 || b == ATRI_IR_I64 ? ATRI_IR_I64 :
-            a == ATRI_IR_I32 || b == ATRI_IR_I32 ? ATRI_IR_I32 : a == ATRI_IR_U8 || b == ATRI_IR_U8 ? ATRI_IR_U8 : ATRI_IR_INVALID;
+        if (e->op == ATRI_SHL || e->op == ATRI_SHR) { return a; }
+        return a != ATRI_IR_INVALID ? a : b;
     }
     return ATRI_IR_INVALID;
 }
 static bool length_literal(AtriSource source, AtriSpan text, uint64_t limit, uint64_t *out) {
-    uint64_t value = 0;
-    for (size_t i = text.start; i < text.end; ++i) {
-        unsigned digit = (unsigned)(source.text[i]-'0');
-        if (value > (limit-digit)/10) { return false; }
-        value = value*10+digit;
-    }
-    *out = value; return true;
+    return atri_integer_literal(source, text, limit, out);
 }
 static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, AtriSpan span,
                         AtriIRType *out, AtriDiagnostic *d, size_t depth, size_t *steps);
@@ -133,31 +206,90 @@ static bool length_value(AtriSource source, const AtriProgram *ast, AtriIRProgra
         *out = e->kind == ATRI_EXPR_SIZEOF ? atri_ir_type_size(p, object) : atri_ir_type_align(p, object); return true;
     }
     if (e->kind == ATRI_EXPR_CAST) {
-        AtriIRType target = constant_type(source, e->text);
+        AtriIRType target = constant_type(source, ast, e->text);
         AtriIRType operand = length_type(source, ast, e->left, depth+1, steps);
         if (operand == ATRI_IR_INVALID) { operand = ATRI_IR_I32; }
         uint64_t bits;
         if (target != type || !length_value(source, ast, p, d, e->left, operand, depth+1, steps, &bits)) { return false; }
         *out = atri_integer_convert(operand, target, bits); return true;
     }
-    uint64_t limit = type == ATRI_IR_U64 ? UINT64_MAX : type == ATRI_IR_U8 ? UINT8_MAX : type == ATRI_IR_I32 ? INT32_MAX : INT64_MAX;
+    uint64_t limit = atri_integer_max(type);
+    if (e->kind == ATRI_EXPR_CHARACTER) {
+        if (type != ATRI_IR_U8) { return false; }
+        size_t cursor = e->text.start+1;
+        *out = atri_literal_byte(source, &cursor); return true;
+    }
     if (e->kind == ATRI_EXPR_INTEGER) { return length_literal(source, e->text, limit, out); }
     if (e->kind == ATRI_EXPR_NAME) {
+        AtriId id = enum_of_member(source, ast, e);
+        if (id != ATRI_NONE) {
+            if (p->enums[id].state == 0 && !layout_enum(source, ast, p, id, depth+1, d)) { return false; }
+            AtriIRType member_type;
+            return atri_enum_member(source, ast, p, e, &member_type, out) && member_type == type;
+        }
         const AtriStatement *decl = length_constant(source, ast, e);
         if (!decl) { return false; }
-        return constant_type(source, decl->type) == type && length_value(source, ast, p, d, decl->expression, type, depth+1, steps, out);
+        return constant_type(source, ast, decl->type) == type && length_value(source, ast, p, d, decl->expression, type, depth+1, steps, out);
     }
     if (e->kind == ATRI_EXPR_RUN) { return length_value(source, ast, p, d, e->left, type, depth+1, steps, out); }
     uint64_t a, b = 0;
     if (e->kind != ATRI_EXPR_UNARY && e->kind != ATRI_EXPR_BINARY) { return false; }
     if (e->kind == ATRI_EXPR_UNARY && e->op == ATRI_NEG && ast->expressions[e->left].kind == ATRI_EXPR_INTEGER) {
-        if (type == ATRI_IR_I32 || type == ATRI_IR_I64) { ++limit; }
+        if (atri_integer_is_signed(type)) { ++limit; }
         return length_literal(source, ast->expressions[e->left].text, limit, &a) && atri_integer_compute(type, ATRI_NEG, a, 0, out);
     }
+    AtriIRType right_type = type;
+    if (e->op == ATRI_SHL || e->op == ATRI_SHR) {
+        right_type = length_type(source, ast, e->right, depth+1, steps);
+        if (right_type == ATRI_IR_INVALID) { right_type = ATRI_IR_I32; }
+    }
     if (!length_value(source, ast, p, d, e->left, type, depth+1, steps, &a) ||
-        (e->kind == ATRI_EXPR_BINARY && !length_value(source, ast, p, d, e->right, type, depth+1, steps, &b))) { return false; }
+        (e->kind == ATRI_EXPR_BINARY && !length_value(source, ast, p, d, e->right, right_type, depth+1, steps, &b))) { return false; }
     if (e->op == ATRI_ADD && e->kind == ATRI_EXPR_UNARY) { *out = a; return true; }
     return atri_integer_compute(type, e->op, a, b, out);
+}
+static bool layout_enum(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, size_t index, size_t depth, AtriDiagnostic *d) {
+    AtriIREnum *item = &p->enums[index];
+    if (item->state == 2) { return true; }
+    if (item->state == 1 || depth > 256) { *d = (AtriDiagnostic){item->name, "cyclic or excessively deep enum value dependency"}; return false; }
+    if (item->variant_count > 4096) { *d = (AtriDiagnostic){item->name, "enum exceeds the prototype limit of 4096 members"}; return false; }
+    item->state = 1;
+    uint64_t previous = 0;
+    for (size_t i = 0; i < item->variant_count; ++i) {
+        size_t id = item->first_variant+i;
+        const AtriEnumVariant *syntax = &ast->variants[id];
+        AtriIREnumVariant *variant = &p->variants[id];
+        variant->name = syntax->name;
+        uint64_t value;
+        if (syntax->expression != ATRI_NONE) {
+            size_t steps = 100000;
+            if (!length_value(source, ast, p, d, syntax->expression, item->underlying, depth+1, &steps, &value)) {
+                if (!d->message) { *d = (AtriDiagnostic){syntax->name, "enum member requires a representable constant integer (layout expression subset)"}; }
+                return false;
+            }
+        } else if (!i) { value = item->flags ? 1 : 0; }
+        else if (item->flags) {
+            if (previous == (UINT64_C(1) << (atri_integer_width(item->underlying)-1))) {
+                *d = (AtriDiagnostic){syntax->name, "bit enum automatic value exceeds its flag width"}; return false;
+            }
+            value = previous << 1;
+        } else {
+            if (previous == atri_integer_max(item->underlying)) { *d = (AtriDiagnostic){syntax->name, "enum automatic value exceeds its integer range"}; return false; }
+            if (!atri_integer_compute(item->underlying, ATRI_ADD, previous, 1, &value)) { return false; }
+        }
+        if (item->flags && (!value || (value & (value-1)))) {
+            *d = (AtriDiagnostic){syntax->name, "bit enum members require a nonzero single-bit value"}; return false;
+        }
+        for (size_t j = 0; j < i; ++j) {
+            const AtriIREnumVariant *other = &p->variants[item->first_variant+j];
+            if ((other->name.end-other->name.start == syntax->name.end-syntax->name.start &&
+                !memcmp(source.text+other->name.start, source.text+syntax->name.start, syntax->name.end-syntax->name.start)) || other->bits == value) {
+                *d = (AtriDiagnostic){syntax->name, "duplicate enum member name or value"}; return false;
+            }
+        }
+        variant->bits = value; variant->ready = true; previous = value;
+    }
+    item->state = 2; return true;
 }
 static bool layout(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, size_t index, size_t depth, AtriDiagnostic *d);
 static bool layout_type(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, AtriIRType type, size_t depth, AtriSpan span, AtriDiagnostic *d) {
@@ -196,7 +328,8 @@ static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram
         uint64_t length;
         AtriIRType value_type = syntax ? length_type(source, ast, syntax->length, depth+1, steps) : ATRI_IR_INVALID;
         if (value_type == ATRI_IR_INVALID) { value_type = ATRI_IR_I64; }
-        if (!syntax || !length_value(source, ast, p, d, syntax->length, value_type, depth+1, steps, &length) || length > 4096) {
+        if (!syntax || !length_value(source, ast, p, d, syntax->length, value_type, depth+1, steps, &length) || length > 4096 ||
+            (atri_integer_is_signed(value_type) && atri_integer_signed(value_type, length) < 0)) {
             if (!d->message) { *d = (AtriDiagnostic){span, "array length requires a nonnegative constant integer up to 4096 (literal or integer constant arithmetic)"}; }
             return false;
         }
@@ -225,27 +358,21 @@ static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram
     }
     AtriIRType type = ATRI_IR_INVALID;
     if (!qualifier.end) {
-        size_t n = name.end-name.start; const char *text = source.text+name.start;
-        if (n == 2 && !memcmp(text, "u8", 2)) { type = ATRI_IR_U8; }
-        else if (n == 3 && !memcmp(text, "i32", 3)) { type = ATRI_IR_I32; }
-        else if (n == 3 && !memcmp(text, "i64", 3)) { type = ATRI_IR_I64; }
-        else if (n == 3 && !memcmp(text, "u64", 3)) { type = ATRI_IR_U64; }
-        else if (n == 4 && !memcmp(text, "void", 4)) { type = ATRI_IR_VOID; }
-        else if (n == 4 && !memcmp(text, "bool", 4)) { type = ATRI_IR_BOOL; }
-        else if (n == 4 && !memcmp(text, "char", 4)) {
-            if (pointers) { *out = ATRI_IR_PTR_CHAR; return true; }
-            *d = (AtriDiagnostic){span, "char values are not supported yet; use *char"}; return false;
-        }
+        type = atri_ir_builtin_type(source.text+name.start, name.end-name.start);
     }
     if (type == ATRI_IR_INVALID) {
         AtriId structure = atri_find_struct(source, ast, span.start, name, qualifier);
         if (structure != ATRI_NONE) { type = (AtriIRType)(ATRI_IR_STRUCT+structure); }
     }
     if (type == ATRI_IR_INVALID) {
-        *d = (AtriDiagnostic){span, "unknown or private type; only u8, i32, i64, u64, bool, supported pointers, fixed arrays and declared structs are supported"}; return false;
+        AtriId id = atri_find_enum(source, ast, span.start, name, qualifier);
+        if (id != ATRI_NONE) { type = p->enums[id].underlying; }
+    }
+    if (type == ATRI_IR_INVALID) {
+        *d = (AtriDiagnostic){span, "unknown or private type; expected a supported scalar, pointer, fixed array or declared struct/union"}; return false;
     }
     if (pointers) { type = atri_ir_pointer_type(type); }
-    if (type == ATRI_IR_INVALID) { *d = (AtriDiagnostic){span, "only pointers to u8, i32, char, arrays and structs are supported"}; return false; }
+    if (type == ATRI_IR_INVALID) { *d = (AtriDiagnostic){span, "only one-level pointers to supported scalars, arrays and structs/unions are supported"}; return false; }
     *out = type; return true;
 }
 bool atri_type_from_source(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, AtriSpan span, AtriIRType *out, AtriDiagnostic *d) {
@@ -255,10 +382,10 @@ bool atri_type_from_source(AtriSource source, const AtriProgram *ast, AtriIRProg
 }
 static bool layout(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, size_t index, size_t depth, AtriDiagnostic *d) {
     AtriIRStruct *t = &p->structs[index];
-    if (t->opaque) { *d = (AtriDiagnostic){t->name, "opaque struct has no complete object layout"}; return false; }
+    if (t->opaque) { *d = (AtriDiagnostic){t->name, "opaque struct/union has no complete object layout"}; return false; }
     if (t->state == 2) { return true; }
-    if (t->state == 1 || depth > 256) { *d = (AtriDiagnostic){ast->structs[index].name, "cyclic or excessively deep by-value struct layout"}; return false; }
-    if (t->field_count > 4096) { *d = (AtriDiagnostic){t->name, "struct exceeds the prototype field count limit"}; return false; }
+    if (t->state == 1 || depth > 256) { *d = (AtriDiagnostic){ast->structs[index].name, "cyclic or excessively deep by-value struct/union layout"}; return false; }
+    if (t->field_count > 4096) { *d = (AtriDiagnostic){t->name, "struct/union exceeds the prototype field count limit"}; return false; }
     t->state = 1; t->alignment = 1;
     for (size_t i = 0; i < t->field_count; ++i) {
         size_t id = t->first_field+i;
@@ -267,31 +394,50 @@ static bool layout(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, 
         for (size_t j = 0; j < i; ++j) {
             AtriSpan other = p->fields[t->first_field+j].name;
             if (other.end-other.start == field->name.end-field->name.start && !memcmp(source.text+other.start, source.text+field->name.start, other.end-other.start)) {
-                *d = (AtriDiagnostic){field->name, "duplicate struct field name"}; return false;
+                *d = (AtriDiagnostic){field->name, t->is_union ? "duplicate union member name" : "duplicate struct field name"}; return false;
             }
         }
         size_t steps = 100000;
         if (!source_type(source, ast, p, ast->fields[id].type, &field->type, d, depth+1, &steps)) { return false; }
         if (!layout_type(source, ast, p, field->type, depth+1, ast->fields[id].type, d)) { return false; }
         size_t alignment = atri_ir_type_align(p, field->type), size = atri_ir_type_size(p, field->type);
-        t->size = (t->size+alignment-1)/alignment*alignment;
-        field->offset = t->size; t->size += size;
+        if (t->is_union) {
+            field->offset = 0;
+            if (size > t->size) { t->size = size; }
+        } else {
+            t->size = (t->size+alignment-1)/alignment*alignment;
+            field->offset = t->size; t->size += size;
+        }
         if (alignment > t->alignment) { t->alignment = alignment; }
-        if (t->size >= 4096) { *d = (AtriDiagnostic){t->name, "struct exceeds the prototype size limit"}; return false; }
+        if (t->size >= 4096) { *d = (AtriDiagnostic){t->name, "struct/union exceeds the prototype size limit"}; return false; }
     }
     t->size = (t->size+t->alignment-1)/t->alignment*t->alignment;
-    if (t->size >= 4096) { *d = (AtriDiagnostic){t->name, "struct exceeds the prototype size limit"}; return false; }
+    if (t->size >= 4096) { *d = (AtriDiagnostic){t->name, "struct/union exceeds the prototype size limit"}; return false; }
     t->state = 2; return true;
 }
 bool atri_layout_structs(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, AtriDiagnostic *d) {
+    p->enum_count = ast->enum_count; p->variant_count = ast->variant_count;
+    p->enums = calloc(p->enum_count ? p->enum_count : 1, sizeof(*p->enums));
+    p->variants = calloc(p->variant_count ? p->variant_count : 1, sizeof(*p->variants));
+    if (!p->enums || !p->variants) { *d = (AtriDiagnostic){{0}, "out of memory"}; return false; }
+    for (size_t i = 0; i < p->enum_count; ++i) {
+        const AtriEnum *syntax = &ast->enums[i];
+        AtriIREnum *item = &p->enums[i];
+        item->name = syntax->name; item->first_variant = syntax->first_variant; item->variant_count = syntax->variant_count;
+        item->underlying = enum_storage(source, syntax->underlying, &item->flags);
+        if (item->underlying == ATRI_IR_INVALID) { *d = (AtriDiagnostic){syntax->underlying, "enum storage requires a fixed-width integer or bit8/16/32/64"}; return false; }
+    }
     if (ast->struct_count >= ATRI_IR_ARRAY-ATRI_IR_STRUCT) { *d = (AtriDiagnostic){{0}, "struct type table exceeds the prototype limit"}; return false; }
     p->struct_count = ast->struct_count; p->field_count = ast->field_count;
     p->structs = calloc(p->struct_count ? p->struct_count : 1, sizeof(*p->structs));
     p->fields = calloc(p->field_count ? p->field_count : 1, sizeof(*p->fields));
     if (!p->structs || !p->fields) { *d = (AtriDiagnostic){{0}, "out of memory"}; return false; }
     for (size_t i = 0; i < p->struct_count; ++i) {
-        p->structs[i] = (AtriIRStruct){.name = ast->structs[i].name, .first_field = ast->structs[i].first_field, .field_count = ast->structs[i].field_count, .opaque = ast->structs[i].opaque, .alignment = 1};
+        p->structs[i] = (AtriIRStruct){.name = ast->structs[i].name, .first_field = ast->structs[i].first_field,
+            .field_count = ast->structs[i].field_count, .opaque = ast->structs[i].opaque,
+            .is_union = ast->structs[i].is_union, .alignment = 1};
     }
+    for (size_t i = 0; i < p->enum_count; ++i) { if (!layout_enum(source, ast, p, i, 0, d)) { return false; } }
     for (size_t i = 0; i < p->struct_count; ++i) { if (!p->structs[i].opaque && !layout(source, ast, p, i, 0, d)) { return false; } }
     for (size_t i = 0; i < p->array_count; ++i) {
         if (!layout_type(source, ast, p, (AtriIRType)(ATRI_IR_ARRAY+i), 0, (AtriSpan){0}, d)) { return false; }

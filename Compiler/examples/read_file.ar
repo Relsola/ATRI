@@ -1,6 +1,6 @@
 stdio :: import "c_stdio";
 
-fn print_file(path: *char) -> i32 {
+fn print_file(path: *u8) -> i32 {
     stream: *stdio::FILE = stdio::fopen(path, "r");
     if (stream == null) {
         return 1;
@@ -12,7 +12,7 @@ fn print_file(path: *char) -> i32 {
             break;
         }
         // 按本次读取长度输出文本，不假设 fread 自动补充 NUL。
-        if (stdio::printf("%.*s", cast(i32, count), cast(*char, &buffer[0])) < 0) {
+        if (stdio::printf("%.*s", cast(i32, count), cast(*u8, &buffer[0])) < 0) {
             stdio::fclose(stream);
             return 2;
         }

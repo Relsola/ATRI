@@ -1,0 +1,24 @@
+union Word {
+    bits: u32;
+    signed_value: i32;
+    bytes: [4]u8;
+}
+
+shared: Word = {.bits = 0x1234_5678};
+
+fn echo(value: Word) -> Word { return value; }
+fn main() -> i32 {
+    if (sizeof(Word) != 4 || alignof(Word) != 4) { return 1; }
+    if (shared.bytes[0] != 0x78 || shared.bytes[3] != 0x12) { return 2; }
+    value: Word = {.signed_value = -1};
+    if (value.bits != 0xffff_ffff) { return 3; }
+    pointer: *Word = &value;
+    (*pointer).bytes[0] = 0;
+    snapshot: Word = echo(value);
+    value.bits = 0;
+    if (snapshot.bits != 0xffff_ff00 || value.bits != 0) { return 4; }
+    items: [2]Word = {{.bits = 3}, {.bits = 5}};
+    items[1].bits += items[0].bits;
+    if (items[1].bits != 8) { return 5; }
+    return 0;
+}

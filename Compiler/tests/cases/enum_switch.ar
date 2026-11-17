@@ -1,0 +1,89 @@
+Color :: enum { Red, Green, Blue, Count, }
+Other :: enum { Zero, One, }
+Flags :: enum(bit8) { Read, Write, Execute, }
+BigFlags :: enum(bit64) { Low, High = 9223372036854775808, }
+Signed8 :: enum(i8) { Min = -128, Next, Max = 127, }
+Signed16 :: enum(i16) { Min = -32768, Next, }
+Signed64 :: enum(i64) { Min = -9223372036854775808, Next, }
+Unsigned16 :: enum(u16) { Max = 65535, }
+Unsigned32 :: enum(u32) { Max = 4294967295, }
+Unsigned64 :: enum(u64) { Max = 18446744073709551615, }
+struct Packet { color: Color; flags: Flags; wide: BigFlags; }
+global: Packet = {.color = Color::Blue, .flags = Flags::Read | Flags::Execute, .wide = BigFlags::High};
+calls: i32;
+
+fn max(a: i32, b: i32) -> i32 { return a > b ? a : b; }
+fn choose(v: i32) -> i32 {
+    result: i32;
+    switch (v) {
+        case -1:
+        case Color::Red:
+            local: i32 = 10; result = local;
+        case Other::One:
+            local: i32 = 3;
+            { local: i32 = 9; result = local; }
+            result += local;
+            # through;
+        case #run max(1, 2):
+            result += 5;
+        default:
+            result = -1;
+    }
+    return result;
+}
+fn selector() -> i32 { calls += 1; return 1; }
+fn evaluate_once() -> i32 {
+    calls = 0;
+    switch (selector()) { case 1: calls += 10; default: calls = -100; }
+    return calls;
+}
+fn loop_control() -> i32 {
+    total: i32;
+    for (i: i32; i < 5; i += 1) {
+        switch (i) {
+            case 1: continue;
+            case 3: break;
+            default: total += i;
+        }
+        total += 10;
+    }
+    return total;
+}
+fn nested(v: i32) -> i32 {
+    result: i32;
+    switch (v) {
+        case 1:
+            loop { result += 1; break; }
+            switch (v+1) { case 2: result += 10; default: result = -100; }
+            #through;
+        default: result += 100;
+    }
+    return result;
+}
+fn empty(v: i32) -> i32 { switch (v) {} return v; }
+fn default_middle(v: i32) -> i32 {
+    result: i32;
+    switch (v) { case 0: result = 1; default: result = 2; #through; case 1: result += 3; }
+    return result;
+}
+fn index(v: Color) -> u8 { values: [Color::Count]u8 = {4,5,6}; return values[v]; }
+fn arithmetic(v: i32) -> i32 { return v + Color::Blue * 2 + Other::One; }
+fn flags(v: Flags) -> Flags { return (v | Flags::Write) ^ Flags::Read; }
+fn flag_zero() -> Flags { return Flags::Read & Flags::Write; }
+fn flags_default() -> Flags { value: Flags; return value; }
+fn big(v: BigFlags) -> BigFlags { return v | BigFlags::High; }
+fn read_global() -> Packet { return global; }
+fn global_address() -> *Packet { return &global; }
+fn signed8() -> Signed8 { return Signed8::Min; }
+fn signed16() -> Signed16 { return Signed16::Min; }
+fn signed64() -> Signed64 { return Signed64::Min; }
+fn unsigned16() -> Unsigned16 { return Unsigned16::Max; }
+fn unsigned32() -> Unsigned32 { return Unsigned32::Max; }
+fn unsigned64() -> Unsigned64 { return Unsigned64::Max; }
+fn wide_case(v: u64) -> i32 {
+    switch (v) { case Unsigned64::Max: return 1; case 0: return 2; default: return 3; }
+}
+#extern(C) fn c_packet(value: Packet) -> Packet;
+#extern(C) fn c_enum(tag: i32, ...) -> u64;
+fn cross(value: Packet) -> Packet { return c_packet(value); }
+fn variadic(value: Flags, wide: BigFlags) -> u64 { return c_enum(1,value,wide); }

@@ -53,7 +53,7 @@ static void types_and_scopes(void) {
     EXPECT_COMPILE_ERROR("fn f()->bool{return true+false;}", "type mismatch");
     EXPECT_COMPILE_ERROR("fn f(p:*i32)->bool{return p<null;}", "ordered comparisons");
     EXPECT_COMPILE_ERROR("fn f(a:i64,b:i32)->bool{return a==b;}", "type mismatch");
-    EXPECT_COMPILE_ERROR("fn f()->bool{return 1<2<3;}", "ordered comparisons");
+    EXPECT_COMPILE_ERROR("fn f()->bool{return 1<2<3;}", "type mismatch");
     EXPECT_COMPILE_ERROR("fn f()->i32{break;return 0;}", "enclosing loop");
     EXPECT_COMPILE_ERROR("fn f()->i32{continue;return 0;}", "enclosing loop");
     EXPECT_COMPILE_ERROR("fn f()->i32{{x:i32=1;}return x;}", "unknown local");

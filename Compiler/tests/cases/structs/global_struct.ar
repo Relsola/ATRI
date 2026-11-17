@@ -1,1 +1,7 @@
-struct A{x:i32;} value:A;fn main()->i32{return 0;}
+struct A { x: i32; }
+value: A;
+fn main() -> i32 {
+    if (value.x != 0) { return 1; }
+    value.x = 42;
+    return value.x - 42;
+}

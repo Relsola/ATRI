@@ -1,0 +1,16 @@
+struct State {
+    count: i32;
+    ready: bool = true;
+}
+
+state: State;
+config: State = {.count = 3};
+
+fn main() -> i32 {
+    if (state.count != 0 || !state.ready) { return 1; }
+    if (config.count != 3 || !config.ready) { return 2; }
+    state = config;
+    state.count += 4;
+    if (state.count != 7 || config.count != 3) { return 3; }
+    return 0;
+}

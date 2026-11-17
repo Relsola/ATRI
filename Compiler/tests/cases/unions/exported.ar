@@ -1,0 +1,3 @@
+export union Word { bits: u32; bytes: [4]u8; }
+export shared: Word = {.bits = 0x12345678};
+export fn address() -> *Word { return &shared; }

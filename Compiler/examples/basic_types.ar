@@ -1,0 +1,25 @@
+// 字符按 u8 字节运算；字符串是 UTF-8 字节指针并附加终止零。
+fn main() -> i32 {
+    flags: u16 = 0b1000_0001;
+    flags |= 0x0100;
+    flags <<= 1;
+    if ((flags & 0x0200) == 0) {
+        return 1;
+    }
+
+    small: i8 = 127;
+    small += 1;
+    if (small != -128) {
+        return 2;
+    }
+
+    character: u8 = 'A';
+    pointer: *u8 = &character;
+    *pointer = '\x42';
+    index: u8 = character - 'A';
+    values: [2]u32 = {1_000, 2_000};
+    if (values[index] != 2_000) {
+        return 3;
+    }
+    return 0;
+}

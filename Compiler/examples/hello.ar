@@ -1,7 +1,7 @@
 import "basic";
 basic :: import "basic";
 
-[[extern(C)]] fn puts(text: *char) -> i32;
+#extern(C) fn puts(text: *u8) -> i32;
 
 fn main() -> i32 {
     a: i32 := 1;

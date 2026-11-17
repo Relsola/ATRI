@@ -1,0 +1,14 @@
+owner :: import "enums/exported";
+import "enums/exported";
+fn main() -> i32 {
+    values: [owner::Color::Count]u8 = {10,20,30};
+    color: owner::Color = Color::Green;
+    if (values[color] != 20 || 1 + owner::Color::Red != 1) { return 1; }
+    switch (color) {
+        case owner::Color::Green: shared = Color::Red;
+        default: return 2;
+    }
+    pointer: *Color = owner::address();
+    if (*pointer != owner::Color::Red) { return 3; }
+    return 0;
+}

@@ -1,0 +1,82 @@
+union U1 { byte: u8; signed_value: i8; }
+union U2 { word: u16; bytes: [2]u8; }
+union U3 { bytes: [3]u8; short_bytes: [2]u8; }
+union U4 { word: u32; signed_value: i32; bytes: [4]u8; }
+struct Parts { low: u32; high: u32; }
+union U8 { wide: u64; pointer: *i32; parts: Parts; }
+union U12 { words: [3]u32; short_value: u16; }
+union U16 { bytes: [9]u8; wide: u64; }
+struct Envelope { tag: u8; value: U16; tail: u32; }
+struct Default { value: i32 = 7; }
+union Defaults { entry: Default; bits: u32; }
+union Raw { flag: bool; pointer: *i32; bits: u64; }
+union Handle;
+union Link { next: *Link; bits: u64; }
+
+global: U8 = {.wide = 0x0123_4567_89ab_cdef};
+big: Envelope = {.tag = 1, .value = {.bytes = {1,2,3,4,5,6,7,8,9}}, .tail = 99};
+zero: Defaults;
+selected: Defaults = {.entry = {}};
+raw: Raw = {.bits = 18446744073709551615};
+recursive: Link;
+
+fn echo1(v: U1) -> U1 { return v; }
+fn echo2(v: U2) -> U2 { return v; }
+fn echo3(v: U3) -> U3 { return v; }
+fn echo4(v: U4) -> U4 { return v; }
+fn echo8(v: U8) -> U8 { return v; }
+fn echo12(v: U12) -> U12 { return v; }
+fn echo16(v: U16) -> U16 { return v; }
+fn echo_envelope(v: Envelope) -> Envelope { return v; }
+fn handle(p: *Handle) -> *Handle { return p; }
+fn null_link() -> bool { return recursive.next == null; }
+fn global_address() -> *U8 { return &global; }
+fn low_address() -> *u32 { return &global.parts.low; }
+fn global_value() -> U8 { return global; }
+fn global_low() -> u32 { return global.parts.low; }
+fn global_big() -> Envelope { return big; }
+fn raw_bits() -> u64 { return raw.bits; }
+fn zero_default() -> i32 { return zero.entry.value; }
+fn selected_default() -> i32 { return selected.entry.value; }
+fn local_defaults() -> i32 {
+    a: Defaults;
+    b: Defaults = {};
+    c: Defaults = {.entry = {}};
+    return a.entry.value + b.entry.value + c.entry.value;
+}
+fn offset(p: *U16, n: i64) -> *U16 { return p+n; }
+fn distance(p: *U16, q: *U16) -> i64 { return p-q; }
+fn fifth(a: U1, b: U2, c: U4, d: U8, e: U16, f: U3) -> u64 {
+    return cast(u64,a.byte)+cast(u64,b.word)+cast(u64,c.word)+d.wide+cast(u64,e.bytes[8])+cast(u64,f.bytes[2]);
+}
+
+#extern(C) fn c_echo1(v: U1) -> U1;
+#extern(C) fn c_echo2(v: U2) -> U2;
+#extern(C) fn c_echo3(v: U3) -> U3;
+#extern(C) fn c_echo4(v: U4) -> U4;
+#extern(C) fn c_echo8(v: U8) -> U8;
+#extern(C) fn c_echo12(v: U12) -> U12;
+#extern(C) fn c_echo16(v: U16) -> U16;
+#extern(C) fn c_envelope(v: Envelope) -> Envelope;
+#extern(C) fn c_fifth(a: U1, b: U2, c: U4, d: U8, e: U16, f: U3) -> u64;
+#extern(C) fn c_independent(a: U16, b: U16) -> u8;
+#extern(C) fn c_variadic(prefix: i32, ...) -> u64;
+#extern(C) fn c_modify(p: *U8) -> void;
+
+fn call_c1(v: U1) -> U1 { return c_echo1(v); }
+fn call_c2(v: U2) -> U2 { return c_echo2(v); }
+fn call_c3(v: U3) -> U3 { return c_echo3(v); }
+fn call_c4(v: U4) -> U4 { return c_echo4(v); }
+fn call_c8(v: U8) -> U8 { return c_echo8(v); }
+fn call_c12(v: U12) -> U12 { return c_echo12(v); }
+fn call_c16(v: U16) -> U16 { return c_echo16(v); }
+fn call_c_envelope(v: Envelope) -> Envelope { return c_envelope(v); }
+fn call_c_fifth(a: U1, b: U2, c: U4, d: U8, e: U16, f: U3) -> u64 {
+    return c_fifth(a,b,c,d,e,f);
+}
+fn independent(v: U16) -> u8 { return c_independent(v,v); }
+fn variadic(a: U4, b: U16) -> u64 { return c_variadic(10,a,b); }
+fn modify() -> u32 {
+    c_modify(&global);
+    return global.parts.low;
+}

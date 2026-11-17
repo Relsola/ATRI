@@ -10,7 +10,11 @@ static bool text(AtriSource s, AtriSpan span, const char *expected) {
 }
 static AtriDiagnostic reject(AtriSource s, const char *message) {
     AtriProgram p; AtriDiagnostic d;
-    CHECK(!atri_parse(s, &p, &d)); CHECK(d.message != NULL && strstr(d.message, message) != NULL);
+    CHECK(!atri_parse(s, &p, &d));
+    if (d.message == NULL || strstr(d.message, message) == NULL) {
+        fprintf(stderr, "Source: %.*s\nExpected diagnostic: %s\nActual: %s\n", (int)s.length, s.text, message, d.message ? d.message : "<none>");
+        CHECK(false);
+    }
     CHECK(d.span.start <= d.span.end && d.span.end <= s.length);
     CHECK(p.function_count == 0 && p.functions == NULL && p.expressions == NULL);
     atri_program_destroy(&p); return d;
@@ -98,7 +102,7 @@ static void errors_and_growth(void) {
         {"fn f()->i32{a:i32: =1;return 0;}", "expected ':='"},
         {"fn f()->i32{return 1+;}", "integer expression"}, {"fn f()->i32{return g(1,);}", "integer expression"},
         {"fn f()->i32{return (1+2;}", "expected ')'"}, {"fn f()->i32{return 0}", "expected ';'"},
-        {"fn f()->i32{return 1_000;}", "only decimal"}, {"fn f()->i32{return 0x10;}", "only decimal"},
+        {"fn f()->i32{return 1__000;}", "separator"}, {"fn f()->i32{return 0x;}", "requires digits"},
         {"fn f()->i32{return 1.5;}", "floating-point"}, {"fn f()->i32{", "expected '}'"},
         {"fn f()->i32{}@", "unexpected character"}, {"fnmain()->i32{}", "top level"}
     };
@@ -119,33 +123,38 @@ static void errors_and_growth(void) {
     memcpy(deep + used, ";}", 3); reject(source(deep), "limit of 256");
 }
 static void attributes_and_strings(void) {
-    AtriSource s = source("[[\nextern ( C )\n]] fn puts(text: *char) -> i32;\n"
+    AtriSource s = source("#\nextern ( C ) fn puts(text: *u8) -> i32;\n"
         "fn main()->i32{puts(\"Hello\\n\\x41\\0tail\");return 0;}");
     AtriProgram p; AtriDiagnostic d;
     CHECK(atri_parse(s, &p, &d));
     CHECK(p.function_count == 2 && p.functions[0].external_c && !p.functions[1].external_c);
     CHECK(p.functions[0].block == ATRI_NONE && p.functions[0].statement_count == 0);
-    CHECK(p.functions[0].span.start == 0 && text(s, p.parameters[0].type, "*char"));
+    CHECK(p.functions[0].span.start == 0 && text(s, p.parameters[0].type, "*u8"));
     const AtriExpr *call = &p.expressions[p.statements[0].expression];
     const AtriExpr *string = &p.expressions[p.arguments[call->first_argument]];
     CHECK(string->kind == ATRI_EXPR_STRING && text(s, string->text, "\"Hello\\n\\x41\\0tail\""));
     atri_program_destroy(&p);
 
-    reject(source("[[unknown(C)]] fn f()->i32;"), "extern(C)");
-    reject(source("[[extern(c)]] fn f()->i32;"), "C calling convention");
-    reject(source("[[extern C]] fn f()->i32;"), "expected '('");
-    reject(source("[[extern(C]] fn f()->i32;"), "expected ')'");
-    reject(source("[[extern(C) fn f()->i32;"), "expected ']]'");
-    reject(source("[[extern(C),other]] fn f()->i32;"), "expected ']]'");
-    reject(source("[[extern(C)]][[extern(C)]] fn f()->i32;"), "top level");
-    reject(source("[[extern(C)]] fn f()->i32{return 0;}"), "cannot have a body");
+    reject(source("#unknown(C) fn f()->i32;"), "unknown compiler directive");
+    reject(source("#extern(c) fn f()->i32;"), "C calling convention");
+    reject(source("#extern C fn f()->i32;"), "expected '('");
+    reject(source("#extern(C fn f()->i32;"), "expected ')'");
+    reject(source("[[extern(C)]] fn f()->i32;"), "top level");
+    reject(source("##extern(C) fn f()->i32;"), "unknown compiler directive");
+    reject(source("fn f()->i32{return run 1;}"), "expected ';'");
+    reject(source("#run {}"), "reserved but not implemented");
+    reject(source("fn f()->void{#run {}}"), "reserved but not implemented");
+    reject(source("#run -> i32 {return 2;}"), "reserved but not implemented");
+    reject(source("fn f()->i32{return #run -> i32 {return 2;};}"), "reserved but not implemented");
+    reject(source("#extern(C)#extern(C) fn f()->i32;"), "top level");
+    reject(source("#extern(C) fn f()->i32{return 0;}"), "cannot have a body");
     reject(source("fn f()->i32;"), "require braces");
-    reject(source("fn f()->*char{return \"bad\\q\";}"), "unsupported string escape");
-    reject(source("fn f()->*char{return \"bad\\x1\";}"), "two hexadecimal digits");
-    reject(source("fn f()->*char{return \"bad\\xG0\";}"), "two hexadecimal digits");
-    reject(source("fn f()->*char{return \"bad\nline\";}"), "newline");
-    reject(source("fn f()->*char{return \"unfinished"), "unterminated string");
-    const char raw_nul[] = "fn f()->*char{return \"raw\0nul\";}";
+    reject(source("fn f()->*u8{return \"bad\\q\";}"), "unsupported string escape");
+    reject(source("fn f()->*u8{return \"bad\\x\";}"), "hexadecimal digits");
+    reject(source("fn f()->*u8{return \"bad\\xG0\";}"), "hexadecimal digits");
+    reject(source("fn f()->*u8{return \"bad\nline\";}"), "newline");
+    reject(source("fn f()->*u8{return \"unfinished"), "unterminated string");
+    const char raw_nul[] = "fn f()->*u8{return \"raw\0nul\";}";
     reject((AtriSource){"string NUL", raw_nul, sizeof(raw_nul)-1}, "NUL byte");
 }
 static void struct_ast(void) {
@@ -161,7 +170,7 @@ static void struct_ast(void) {
     atri_program_destroy(&program);
 }
 static void array_and_run_ast(void) {
-    AtriSource input = source("run n:i32 := 2;fn f()->i32{data:[2][2]u8={{1,2},{3,4}};return run (true?1:false?2:3);}");
+    AtriSource input = source("n:i32 := #run 2;fn f()->i32{data:[2][2]u8={{1,2},{3,4}};return #run (true?1:false?2:3);}");
     AtriProgram p;
     AtriDiagnostic d;
     CHECK(atri_parse(input, &p, &d));
@@ -174,14 +183,14 @@ static void array_and_run_ast(void) {
     atri_program_destroy(&p);
     reject(source("fn f()->i32{a:[2]i32;return a[0;}"), "expected ']'");
     reject(source("fn f()->i32{return true?1;}"), "expected ':'");
-    input = source("run n:i32=1+2;fn f()->i32{run a:i32=3+4;return a;}");
+    input = source("n:i32= #run 1+2;fn f()->i32{a:i32= #run 3+4;return a;}");
     CHECK(atri_parse(input, &p, &d));
     CHECK(p.globals[0].declaration.kind == ATRI_STMT_VARIABLE);
     const AtriExpr *global = &p.expressions[p.globals[0].declaration.expression];
-    CHECK(global->kind == ATRI_EXPR_RUN && p.expressions[global->left].kind == ATRI_EXPR_BINARY);
+    CHECK(global->kind == ATRI_EXPR_BINARY && p.expressions[global->left].kind == ATRI_EXPR_RUN);
     CHECK(p.statements[0].kind == ATRI_STMT_VARIABLE);
     const AtriExpr *local = &p.expressions[p.statements[0].expression];
-    CHECK(local->kind == ATRI_EXPR_RUN && p.expressions[local->left].kind == ATRI_EXPR_BINARY);
+    CHECK(local->kind == ATRI_EXPR_BINARY && p.expressions[local->left].kind == ATRI_EXPR_RUN);
     atri_program_destroy(&p);
 }
 static void conversions_and_layout_ast(void) {
@@ -197,7 +206,7 @@ static void conversions_and_layout_ast(void) {
     atri_program_destroy(&p);
 }
 static void variadic_opaque_void_ast(void) {
-    AtriSource input = source("struct FILE;[[extern(C)]]fn log(format:*char,...)->void;fn f()->void{return;}");
+    AtriSource input = source("struct FILE;#extern(C)fn log(format:*u8,...)->void;fn f()->void{return;}");
     AtriProgram p;
     AtriDiagnostic d;
     CHECK(atri_parse(input, &p, &d));
@@ -206,7 +215,71 @@ static void variadic_opaque_void_ast(void) {
     CHECK(p.statements[0].kind == ATRI_STMT_RETURN && p.statements[0].expression == ATRI_NONE);
     atri_program_destroy(&p);
 }
+static void integer_operators_and_literals(void) {
+    AtriSource input = source("fn f()->u16{x:u16=0xF_F;x<<=0b10;x|=1_000;return ~x & 255 ^ 2 | 1;}");
+    AtriProgram p;
+    AtriDiagnostic d;
+    CHECK(atri_parse(input, &p, &d));
+    CHECK(p.statements[1].compound && p.statements[1].op == ATRI_SHL);
+    CHECK(p.statements[2].compound && p.statements[2].op == ATRI_BIT_OR);
+    const AtriExpr *value = &p.expressions[p.statements[3].expression];
+    CHECK(value->op == ATRI_BIT_OR && p.expressions[value->left].op == ATRI_BIT_XOR);
+    const AtriExpr *inner = &p.expressions[p.expressions[value->left].left];
+    CHECK(inner->op == ATRI_BIT_AND && p.expressions[inner->left].op == ATRI_BIT_NOT);
+    atri_program_destroy(&p);
+    const char *bad[] = {"0x", "0b", "0b102", "0x_1", "1_", "1__0", "0xG", "10u32", "0o10", "0O10"};
+    for (size_t i = 0; i < sizeof(bad)/sizeof(*bad); ++i) {
+        char code[128];
+        snprintf(code, sizeof(code), "fn f()->i32{return %s;}", bad[i]);
+        reject(source(code), "integer");
+    }
+    reject(source("fn f()->u8{return ''; }"), "one decoded byte");
+    reject(source("fn f()->u8{return 'ab'; }"), "one decoded byte");
+    reject(source("fn f()->u8{return '中'; }"), "one decoded byte");
+    reject(source("fn f()->u8{return '\\x100'; }"), "one decoded byte");
+    reject(source("fn f()->u8{return '\\400'; }"), "unsupported string escape");
+    reject(source("fn f()->u8{return '\\101'; }"), "unsupported string escape");
+    reject(source("fn f()->u8{return '\\x1'; }"), "exactly two hexadecimal digits");
+    reject(source("fn f()->u8{return '\\01'; }"), "one decoded byte");
+    reject(source("fn f()->*u8{return \"\\?\"; }"), "unsupported string escape");
+    reject(source("fn f()->i32{x:i32;return x++;}"), "integer expression");
+}
+static void union_ast(void) {
+    AtriSource input = source("export union Value{bits:u32;bytes:[4]u8;}union Handle;"
+        "fn f()->Value{return {.bits=7};}");
+    AtriProgram p;
+    AtriDiagnostic d;
+    CHECK(atri_parse(input, &p, &d));
+    CHECK(p.struct_count == 2 && p.structs[0].is_union && p.structs[0].exported);
+    CHECK(p.structs[0].field_count == 2 && p.structs[1].is_union && p.structs[1].opaque);
+    atri_program_destroy(&p);
+    reject(source("union Empty{}"), "at least one named member");
+    reject(source("union U{x:i32=1;}"), "cannot have declaration default");
+    reject(source("union U{u32;}"), "':'");
+}
+static void enum_switch_ast(void) {
+    AtriProgram enum_program;
+    AtriDiagnostic enum_diagnostic;
+    AtriSource enum_source = source("export Color::enum(u8){Red,Blue=3,}"
+        "fn f(x:u8)->i32{switch(x){case m::Color::Red:{a:i32=1;}#through;default:return 0;}return 1;}");
+    CHECK(atri_parse(enum_source, &enum_program, &enum_diagnostic));
+    CHECK(enum_program.enum_count == 1 && enum_program.enums[0].exported && enum_program.variant_count == 2);
+    CHECK(text(enum_source, enum_program.enums[0].underlying, "u8"));
+    CHECK(enum_program.case_count == 2 && enum_program.cases[0].through);
+    const AtriExpr *member = &enum_program.expressions[enum_program.cases[0].expression];
+    CHECK(text(enum_source, member->module, "m") && text(enum_source, member->qualifier, "Color") && text(enum_source, member->text, "Red"));
+    atri_program_destroy(&enum_program);
+    reject(source("E::enum{}"), "at least one member");
+    reject(source("fn f()->void{switch(0){default:default:}}"), "duplicate switch default");
+    reject(source("fn f()->void{switch(0){case 0:#through;}}"), "non-final switch case");
+    reject(source("fn f()->void{switch(0){case 0:#through;return;default:}}"), "non-final switch case");
+    reject(source("fn f()->void{#through;}"), "only allowed");
+    reject(source("fn f()->void{switch(0){case 0:{#through;}default:}}"), "only allowed");
+}
 int main(void) {
+    enum_switch_ast();
+    union_ast();
+    integer_operators_and_literals();
     variadic_opaque_void_ast();
     conversions_and_layout_ast();
     array_and_run_ast();

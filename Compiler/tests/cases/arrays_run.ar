@@ -1,6 +1,6 @@
 N: i32 := 3;
 counter: i32;
-run initial: i32 = max(1, 2);
+initial: i32 = #run max(1, 2);
 
 struct Item { value: i32 = 7; }
 struct Buffer { data: [N]u8; flag: bool; }
@@ -56,16 +56,16 @@ fn main() -> i32 {
     ordered: [3]i32 = {next(), next()};
     if (ordered[0] != 1 || ordered[1] != 2 || ordered[2] != 0 || counter != 2) { return 3; }
     if (!bytes() || !nested()) { return 4; }
-    run a: i32 := max(1, 2);
-    run b: i32 = max(8, 3);
+    a: i32 := #run max(1, 2);
+    b: i32 = #run max(8, 3);
     c: i32 := true ? 6 : 1 / 0;
     if (a != 2 || b != 8 || c != 6) { return 5; }
-    // run 只决定初始值的求值阶段，普通变量仍可在运行期更新。
+    // #run 只决定初始值的求值阶段，普通变量仍可在运行期更新。
     b = b + next();
     if (b != 11 || counter != 3) { return 8; }
     if (initial != 2) { return 9; }
     initial = 4;
-    for (run i: i32 = max(0, 1); i < 3; i = i + 1) { initial = initial + i; }
+    for (i: i32 = #run max(0, 1); i < 3; i = i + 1) { initial = initial + i; }
     if (initial != 7) { return 10; }
     // 未选中的分支不得调用 next；运行期与编译期均按所选路径求值。
     selected: i32 = false ? next() : max(7, 4);

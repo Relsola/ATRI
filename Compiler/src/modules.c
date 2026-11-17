@@ -192,7 +192,7 @@ AtriId atri_find_declaration(AtriSource source, const AtriProgram *p, size_t off
     return ATRI_NONE;
 }
 
-AtriId atri_find_struct(AtriSource source, const AtriProgram *p, size_t offset, AtriSpan name, AtriSpan qualifier) {
+static AtriId find_type(AtriSource source, const AtriProgram *p, size_t offset, AtriSpan name, AtriSpan qualifier, unsigned kind) {
     AtriId owner = atri_module_at(p, offset), target = owner;
     if (p->symbols) {
         if (qualifier.end) {
@@ -201,20 +201,28 @@ AtriId atri_find_struct(AtriSource source, const AtriProgram *p, size_t offset, 
             target = binding->target;
         }
         const AtriModuleSymbol *symbol = find_symbol(source, p, target, name);
-        return symbol && symbol->kind == 3 && (!qualifier.end || symbol->exported) ? symbol->target : ATRI_NONE;
+        return symbol && symbol->kind == kind && (!qualifier.end || symbol->exported) ? symbol->target : ATRI_NONE;
     }
-    for (size_t i = 0; i < p->struct_count; ++i) {
-        if (atri_module_at(p, p->structs[i].name.start) == owner && same(source, name, p->structs[i].name) && !qualifier.end) { return i; }
+    size_t count = kind == 3 ? p->struct_count : p->enum_count;
+    for (size_t i = 0; i < count; ++i) {
+        AtriSpan candidate = kind == 3 ? p->structs[i].name : p->enums[i].name;
+        if (atri_module_at(p, candidate.start) == owner && same(source, name, candidate) && !qualifier.end) { return i; }
     }
     return ATRI_NONE;
+}
+AtriId atri_find_struct(AtriSource source, const AtriProgram *p, size_t offset, AtriSpan name, AtriSpan qualifier) {
+    return find_type(source, p, offset, name, qualifier, 3);
+}
+AtriId atri_find_enum(AtriSource source, const AtriProgram *p, size_t offset, AtriSpan name, AtriSpan qualifier) {
+    return find_type(source, p, offset, name, qualifier, 4);
 }
 
 static bool build_symbols(AtriSource source, AtriProgram *p, AtriDiagnostic *diagnostic) {
     size_t capacity = 0;
     for (size_t phase = 0; phase < 2; ++phase) {
-        size_t limit = phase ? p->import_count : p->function_count + p->global_count + p->struct_count;
+        size_t limit = phase ? p->import_count : p->function_count + p->global_count + p->struct_count + p->enum_count;
         for (size_t i = 0; i < limit; ++i) {
-            size_t declarations = phase && !p->imports[i].name.end ? p->function_count + p->global_count + p->struct_count : 1;
+            size_t declarations = phase && !p->imports[i].name.end ? p->function_count + p->global_count + p->struct_count + p->enum_count : 1;
             for (size_t j = 0; j < declarations; ++j) {
                 AtriModuleSymbol item = {0};
                 if (phase && p->imports[i].target == ATRI_NONE) {
@@ -224,10 +232,14 @@ static bool build_symbols(AtriSource source, AtriProgram *p, AtriDiagnostic *dia
                     item.kind = 2; item.span = p->imports[i].name; item.target = p->imports[i].target;
                 } else {
                     size_t index = phase ? j : i;
-                    item.kind = index < p->function_count ? 0 : index < p->function_count+p->global_count ? 1 : 3;
-                    item.target = item.kind == 0 ? index : item.kind == 1 ? index-p->function_count : index-p->function_count-p->global_count;
-                    item.span = item.kind == 0 ? p->functions[item.target].name : item.kind == 1 ? p->globals[item.target].declaration.name : p->structs[item.target].name;
-                    item.exported = item.kind == 0 ? p->functions[item.target].exported : item.kind == 1 ? p->globals[item.target].exported : p->structs[item.target].exported;
+                    size_t types = p->function_count+p->global_count;
+                    item.kind = index < p->function_count ? 0 : index < types ? 1 : index < types+p->struct_count ? 3 : 4;
+                    item.target = item.kind == 0 ? index : item.kind == 1 ? index-p->function_count :
+                        item.kind == 3 ? index-types : index-types-p->struct_count;
+                    item.span = item.kind == 0 ? p->functions[item.target].name : item.kind == 1 ? p->globals[item.target].declaration.name :
+                        item.kind == 3 ? p->structs[item.target].name : p->enums[item.target].name;
+                    item.exported = item.kind == 0 ? p->functions[item.target].exported : item.kind == 1 ? p->globals[item.target].exported :
+                        item.kind == 3 ? p->structs[item.target].exported : p->enums[item.target].exported;
                     if (phase && (!item.exported || atri_module_at(p, item.span.start) != p->imports[i].target)) { continue; }
                 }
                 item.owner = atri_module_at(p, phase ? p->imports[i].path.start : item.span.start);

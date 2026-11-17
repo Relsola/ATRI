@@ -1,0 +1,3 @@
+export Color :: enum(u8) { Red, Green, Count = 3, }
+export shared: Color = Color::Green;
+export fn address() -> *Color { return &shared; }

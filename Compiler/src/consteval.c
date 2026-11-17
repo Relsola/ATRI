@@ -128,7 +128,15 @@ static bool value(Frame *frame, AtriId id, uint64_t *out) {
             ok = constant(e, f, &f->constants[c], out); goto save;
         }
     switch (inst->kind) {
-        case ATRI_IR_C_PROMOTE: ok = value(frame, inst->left, out); break;
+        case ATRI_IR_C_PROMOTE: {
+            uint64_t source;
+            if (value(frame, inst->left, &source)) {
+                *out = f->instructions[inst->left].type == ATRI_IR_BOOL ? source :
+                    atri_integer_convert(f->instructions[inst->left].type, ATRI_IR_I32, source);
+                ok = true;
+            }
+            break;
+        }
         case ATRI_IR_CAST: {
             uint64_t source;
             if (value(frame, inst->left, &source)) {
@@ -167,7 +175,8 @@ static bool value(Frame *frame, AtriId id, uint64_t *out) {
             if (inst->kind == ATRI_IR_BINARY && !value(frame, inst->right, &b)) break;
             if (inst->op == ATRI_NOT) { *out = !a; ok = true; break; }
             if (!atri_integer_compute(inst->type, inst->op, a, b, out))
-                error(e, inst->span, b == 0 ? "compile-time division or remainder by zero" :
+                error(e, inst->span, (inst->op == ATRI_SHL || inst->op == ATRI_SHR) ? "compile-time shift count is outside the operand width" :
+                      b == 0 ? "compile-time division or remainder by zero" :
                       "invalid compile-time signed integer division or remainder (INT_MIN / -1)");
             else ok = true;
             break;

@@ -1,0 +1,25 @@
+Color :: enum { Red, Green, Blue, Count, }
+ByteColor :: enum(u8) { Red, Green, Blue, }
+Flags :: enum(bit8) { Read, Write, Execute, }
+
+fn selected() -> i32 { return Color::Green; }
+fn main() -> i32 {
+    colors: [Color::Count]u8 = {10, 20, 30};
+    if (colors[Color::Green] != 20 || 1 + Color::Red != 1) { return 1; }
+    flags: Flags = Flags::Read | Flags::Write;
+    if ((flags & Flags::Read) == 0 || (Flags::Read & Flags::Write) != 0) { return 2; }
+    value: i32;
+    switch (selected()) {
+        case Color::Red:
+            value = 10;
+        case Color::Green:
+            { temporary: i32 = 20; value = temporary; }
+            #through;
+        case #run (1 + 1):
+            value += 3;
+        default:
+            value = -1;
+    }
+    if (value != 23 || sizeof(ByteColor) != 1) { return 3; }
+    return 0;
+}

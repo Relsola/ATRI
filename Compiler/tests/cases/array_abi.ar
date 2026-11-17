@@ -1,8 +1,8 @@
 struct Small { bytes: [3]u8; tail: u8; }
 struct Big { values: [3]i64; }
-[[extern(C)]] fn c_byte(p: *u8, a: u8, b: u8, c: u8, d: u8) -> u8;
-[[extern(C)]] fn c_small(s: Small) -> Small;
-[[extern(C)]] fn c_big(s: Big) -> Big;
+#extern(C) fn c_byte(p: *u8, a: u8, b: u8, c: u8, d: u8) -> u8;
+#extern(C) fn c_small(s: Small) -> Small;
+#extern(C) fn c_big(s: Big) -> Big;
 fn same_small(s: Small) -> Small { return s; }
 fn same_big(s: Big) -> Big { return s; }
 fn call_c() -> i32 {

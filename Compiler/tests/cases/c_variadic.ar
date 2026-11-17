@@ -1,23 +1,23 @@
 // FILE 由 C 运行库管理，ATRI 只保存和传递指针，不访问内部布局。
 struct FILE;
 
-[[extern(C)]] fn fopen(path: *char, mode: *char) -> *FILE;
-[[extern(C)]] fn fread(buffer: *void, size: u64, count: u64, stream: *FILE) -> u64;
-[[extern(C)]] fn fwrite(buffer: *void, size: u64, count: u64, stream: *FILE) -> u64;
-[[extern(C)]] fn fclose(stream: *FILE) -> i32;
-[[extern(C)]] fn ferror(stream: *FILE) -> i32;
-[[extern(C)]] fn feof(stream: *FILE) -> i32;
-[[extern(C)]] fn printf(format: *char, ...) -> i32;
+#extern(C) fn fopen(path: *u8, mode: *u8) -> *FILE;
+#extern(C) fn fread(buffer: *void, size: u64, count: u64, stream: *FILE) -> u64;
+#extern(C) fn fwrite(buffer: *void, size: u64, count: u64, stream: *FILE) -> u64;
+#extern(C) fn fclose(stream: *FILE) -> i32;
+#extern(C) fn ferror(stream: *FILE) -> i32;
+#extern(C) fn feof(stream: *FILE) -> i32;
+#extern(C) fn printf(format: *u8, ...) -> i32;
 
 
 struct Small { a: i32; b: i32; }
 struct Big { a: i64; b: i64; c: i64; }
 struct Handle;
-[[extern(C)]] fn c_args(tag: i32, ...) -> i32;
-[[extern(C)]] fn c_big(tag: i32, ...) -> Big;
-[[extern(C)]] fn c_void(tag: i32, ...) -> void;
-[[extern(C)]] fn c_only(...) -> i32;
-[[extern(C)]] fn c_order(tag: i32, ...) -> i32;
+#extern(C) fn c_args(tag: i32, ...) -> i32;
+#extern(C) fn c_big(tag: i32, ...) -> Big;
+#extern(C) fn c_void(tag: i32, ...) -> void;
+#extern(C) fn c_only(...) -> i32;
+#extern(C) fn c_order(tag: i32, ...) -> i32;
 order: i32;
 fn next() -> i32 { order = order + 1; return order; }
 
@@ -45,7 +45,7 @@ fn constant_void() -> i32 {
     local_cleanup();
     return 9;
 }
-fn check_file(path: *char, missing: *char) -> i32 {
+fn check_file(path: *u8, missing: *u8) -> i32 {
     stream: *FILE = fopen(path, "rb");
     if (stream == null) { return 10; }
     buffer: [3]u8;
@@ -65,7 +65,7 @@ fn check_file(path: *char, missing: *char) -> i32 {
     if (absent != null) { fclose(absent); return 13; }
     return 0;
 }
-fn check_write(path: *char) -> i32 {
+fn check_write(path: *u8) -> i32 {
     stream: *FILE = fopen(path, "wb");
     if (stream == null) { return 14; }
     data: [4]u8 = {0, 128, 255, 10};
