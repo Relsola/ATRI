@@ -154,6 +154,48 @@ static void invalid_arrays(void) {
     EXPECT_VALID_IR(test.after);
     test_destroy(&test);
 }
+static void invalid_conversions(void) {
+    Compilation test = test_compile("cast verifier", "fn f(a:i32)->u64{return cast(u64,a);}", TEST_O0);
+    AtriIRFunction *f = test_function(&test.after, "f");
+    AtriId cast = test_instruction(&test.after, "f", ATRI_IR_CAST, 0);
+    EXPECT_VALID_IR(test.after);
+    f->instructions[cast].left = cast;
+    EXPECT_INVALID_IR(test.after);
+    f->instructions[cast].left = 0;
+    f->instructions[cast].type = ATRI_IR_BOOL;
+    EXPECT_INVALID_IR(test.after);
+    f->instructions[cast].type = ATRI_IR_U64;
+    EXPECT_VALID_IR(test.after);
+    test_destroy(&test);
+}
+static void invalid_variadic_and_void(void) {
+    Compilation test = test_compile("vararg verifier", "[[extern(C)]]fn c(x:i32,...)->void;"
+        "fn f(b:u8)->void{c(1,b);}", TEST_O0);
+    AtriIRFunction *f = test_function(&test.after, "f");
+    AtriId call = test_instruction(&test.after, "f", ATRI_IR_CALL, 0);
+    AtriId promoted = f->arguments[f->instructions[call].first_argument+1];
+    EXPECT_VALID_IR(test.after);
+    f->arguments[f->instructions[call].first_argument+1] = f->instructions[promoted].left;
+    EXPECT_INVALID_IR(test.after);
+    f->arguments[f->instructions[call].first_argument+1] = promoted;
+    f->instructions[promoted].type = ATRI_IR_U8;
+    EXPECT_INVALID_IR(test.after);
+    f->instructions[promoted].type = ATRI_IR_I32;
+    f->instructions[f->instruction_count-1].left = 0;
+    EXPECT_INVALID_IR(test.after);
+    f->instructions[f->instruction_count-1].left = ATRI_NONE;
+    f->variadic = true;
+    EXPECT_INVALID_IR(test.after);
+    f->variadic = false;
+    EXPECT_VALID_IR(test.after);
+    test_destroy(&test);
+    test = test_compile("opaque verifier", "struct O;fn f(p:*O)->*O{return p;}", TEST_O0);
+    test.after.program.structs[0].size = 1;
+    EXPECT_INVALID_IR(test.after);
+    test.after.program.structs[0].size = 0;
+    EXPECT_VALID_IR(test.after);
+    test_destroy(&test);
+}
 int main(void) {
     invalid_value_and_terminator();
     invalid_memory_operands();
@@ -163,6 +205,8 @@ int main(void) {
     invalid_globals();
     invalid_structs();
     invalid_arrays();
+    invalid_variadic_and_void();
+    invalid_conversions();
     puts("IR verifier tests passed");
     return 0;
 }

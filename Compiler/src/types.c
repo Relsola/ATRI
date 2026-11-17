@@ -8,18 +8,22 @@ bool atri_ir_is_struct(AtriIRType type) { return type >= ATRI_IR_STRUCT && type 
 bool atri_ir_is_array(AtriIRType type) { return type >= ATRI_IR_ARRAY && type < ATRI_IR_PTR_STRUCT; }
 bool atri_ir_is_aggregate(AtriIRType type) { return atri_ir_is_struct(type) || atri_ir_is_array(type); }
 AtriIRType atri_ir_pointee(AtriIRType type) {
-    return type == ATRI_IR_PTR_U8 ? ATRI_IR_U8 : type == ATRI_IR_PTR_I32 ? ATRI_IR_I32 : type >= ATRI_IR_PTR_STRUCT ? (AtriIRType)(type-ATRI_IR_PTR_STRUCT+ATRI_IR_STRUCT) : ATRI_IR_INVALID;
+    return type == ATRI_IR_PTR_VOID ? ATRI_IR_VOID : type == ATRI_IR_PTR_U8 ? ATRI_IR_U8 : type == ATRI_IR_PTR_I32 ? ATRI_IR_I32 : type >= ATRI_IR_PTR_STRUCT ? (AtriIRType)(type-ATRI_IR_PTR_STRUCT+ATRI_IR_STRUCT) : ATRI_IR_INVALID;
 }
 AtriIRType atri_ir_pointer_type(AtriIRType type) {
-    return type == ATRI_IR_U8 ? ATRI_IR_PTR_U8 : type == ATRI_IR_I32 ? ATRI_IR_PTR_I32 : atri_ir_is_aggregate(type) ? (AtriIRType)(type-ATRI_IR_STRUCT+ATRI_IR_PTR_STRUCT) : ATRI_IR_INVALID;
+    return type == ATRI_IR_VOID ? ATRI_IR_PTR_VOID : type == ATRI_IR_U8 ? ATRI_IR_PTR_U8 : type == ATRI_IR_I32 ? ATRI_IR_PTR_I32 : atri_ir_is_aggregate(type) ? (AtriIRType)(type-ATRI_IR_STRUCT+ATRI_IR_PTR_STRUCT) : ATRI_IR_INVALID;
 }
 bool atri_ir_valid_type(const AtriIRProgram *p, AtriIRType type) {
-    if (atri_ir_is_struct(type)) { return (size_t)(type-ATRI_IR_STRUCT) < p->struct_count; }
+    if (atri_ir_is_struct(type)) { return (size_t)(type-ATRI_IR_STRUCT) < p->struct_count && !p->structs[type-ATRI_IR_STRUCT].opaque; }
     if (atri_ir_is_array(type)) { return (size_t)(type-ATRI_IR_ARRAY) < p->array_count; }
-    if (type >= ATRI_IR_PTR_STRUCT) { return atri_ir_is_aggregate(atri_ir_pointee(type)) && atri_ir_valid_type(p, atri_ir_pointee(type)); }
-    return atri_ir_is_integer(type) || type == ATRI_IR_BOOL || type == ATRI_IR_PTR_I32 || type == ATRI_IR_PTR_CHAR || type == ATRI_IR_PTR_U8;
+    if (type >= ATRI_IR_PTR_STRUCT) {
+        AtriIRType target = atri_ir_pointee(type);
+        return atri_ir_is_struct(target) ? (size_t)(target-ATRI_IR_STRUCT) < p->struct_count : atri_ir_is_array(target) && atri_ir_valid_type(p, target);
+    }
+    return atri_ir_is_integer(type) || type == ATRI_IR_BOOL || type == ATRI_IR_PTR_I32 || type == ATRI_IR_PTR_CHAR || type == ATRI_IR_PTR_U8 || type == ATRI_IR_PTR_VOID;
 }
 size_t atri_ir_type_size(const AtriIRProgram *p, AtriIRType type) {
+    if (type == ATRI_IR_VOID) { return 0; }
     if (atri_ir_is_struct(type)) { return p->structs[type-ATRI_IR_STRUCT].size; }
     if (atri_ir_is_array(type)) {
         const AtriIRArray *a = &p->arrays[type-ATRI_IR_ARRAY];
@@ -37,6 +41,7 @@ static AtriIRType constant_type(AtriSource source, AtriSpan span) {
     const char *name = source.text+span.start;
     return n == 3 && !memcmp(name, "i32", 3) ? ATRI_IR_I32 :
         n == 3 && !memcmp(name, "i64", 3) ? ATRI_IR_I64 :
+        n == 3 && !memcmp(name, "u64", 3) ? ATRI_IR_U64 :
         n == 2 && !memcmp(name, "u8", 2) ? ATRI_IR_U8 : ATRI_IR_INVALID;
 }
 static bool name_matches(AtriSource source, AtriSpan a, AtriSpan b) {
@@ -88,6 +93,8 @@ static AtriIRType length_type(AtriSource source, const AtriProgram *ast, AtriId 
     if (depth > 256 || !*steps) { return ATRI_IR_INVALID; }
     --*steps;
     const AtriExpr *e = &ast->expressions[id];
+    if (e->kind == ATRI_EXPR_SIZEOF || e->kind == ATRI_EXPR_ALIGNOF) { return ATRI_IR_U64; }
+    if (e->kind == ATRI_EXPR_CAST) { return constant_type(source, e->text); }
     if (e->kind == ATRI_EXPR_NAME) {
         const AtriStatement *decl = length_constant(source, ast, e);
         return decl ? constant_type(source, decl->type) : ATRI_IR_INVALID;
@@ -96,7 +103,7 @@ static AtriIRType length_type(AtriSource source, const AtriProgram *ast, AtriId 
     if (e->kind == ATRI_EXPR_BINARY) {
         AtriIRType a = length_type(source, ast, e->left, depth+1, steps);
         AtriIRType b = length_type(source, ast, e->right, depth+1, steps);
-        return a == ATRI_IR_I64 || b == ATRI_IR_I64 ? ATRI_IR_I64 :
+        return a == ATRI_IR_U64 || b == ATRI_IR_U64 ? ATRI_IR_U64 : a == ATRI_IR_I64 || b == ATRI_IR_I64 ? ATRI_IR_I64 :
             a == ATRI_IR_I32 || b == ATRI_IR_I32 ? ATRI_IR_I32 : a == ATRI_IR_U8 || b == ATRI_IR_U8 ? ATRI_IR_U8 : ATRI_IR_INVALID;
     }
     return ATRI_IR_INVALID;
@@ -110,31 +117,51 @@ static bool length_literal(AtriSource source, AtriSpan text, uint64_t limit, uin
     }
     *out = value; return true;
 }
-static bool length_value(AtriSource source, const AtriProgram *ast, AtriId id, AtriIRType type, size_t depth, size_t *steps, uint64_t *out) {
-    if (depth > 256 || !*steps || id >= ast->expression_count) { return false; }
+static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, AtriSpan span,
+                        AtriIRType *out, AtriDiagnostic *d, size_t depth, size_t *steps);
+static bool layout_type(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, AtriIRType type, size_t depth, AtriSpan span, AtriDiagnostic *d);
+static bool length_value(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, AtriDiagnostic *d, AtriId id, AtriIRType type, size_t depth, size_t *steps, uint64_t *out) {
+    if (depth > 256 || !*steps) {
+        *d = (AtriDiagnostic){ast->expressions[id].span, "layout/type evaluation exceeded its resource limit (possible cyclic query)"}; return false;
+    }
     --*steps;
     const AtriExpr *e = &ast->expressions[id];
-    uint64_t limit = type == ATRI_IR_U8 ? UINT8_MAX : type == ATRI_IR_I32 ? INT32_MAX : INT64_MAX;
+    if (e->kind == ATRI_EXPR_SIZEOF || e->kind == ATRI_EXPR_ALIGNOF) {
+        AtriIRType object;
+        if (type != ATRI_IR_U64 || !source_type(source, ast, p, e->text, &object, d, depth+1, steps) ||
+            !layout_type(source, ast, p, object, depth+1, e->span, d)) { return false; }
+        *out = e->kind == ATRI_EXPR_SIZEOF ? atri_ir_type_size(p, object) : atri_ir_type_align(p, object); return true;
+    }
+    if (e->kind == ATRI_EXPR_CAST) {
+        AtriIRType target = constant_type(source, e->text);
+        AtriIRType operand = length_type(source, ast, e->left, depth+1, steps);
+        if (operand == ATRI_IR_INVALID) { operand = ATRI_IR_I32; }
+        uint64_t bits;
+        if (target != type || !length_value(source, ast, p, d, e->left, operand, depth+1, steps, &bits)) { return false; }
+        *out = atri_integer_convert(operand, target, bits); return true;
+    }
+    uint64_t limit = type == ATRI_IR_U64 ? UINT64_MAX : type == ATRI_IR_U8 ? UINT8_MAX : type == ATRI_IR_I32 ? INT32_MAX : INT64_MAX;
     if (e->kind == ATRI_EXPR_INTEGER) { return length_literal(source, e->text, limit, out); }
     if (e->kind == ATRI_EXPR_NAME) {
         const AtriStatement *decl = length_constant(source, ast, e);
         if (!decl) { return false; }
-        return constant_type(source, decl->type) == type && length_value(source, ast, decl->expression, type, depth+1, steps, out);
+        return constant_type(source, decl->type) == type && length_value(source, ast, p, d, decl->expression, type, depth+1, steps, out);
     }
-    if (e->kind == ATRI_EXPR_RUN) { return length_value(source, ast, e->left, type, depth+1, steps, out); }
+    if (e->kind == ATRI_EXPR_RUN) { return length_value(source, ast, p, d, e->left, type, depth+1, steps, out); }
     uint64_t a, b = 0;
     if (e->kind != ATRI_EXPR_UNARY && e->kind != ATRI_EXPR_BINARY) { return false; }
     if (e->kind == ATRI_EXPR_UNARY && e->op == ATRI_NEG && ast->expressions[e->left].kind == ATRI_EXPR_INTEGER) {
-        if (type != ATRI_IR_U8) { ++limit; }
+        if (type == ATRI_IR_I32 || type == ATRI_IR_I64) { ++limit; }
         return length_literal(source, ast->expressions[e->left].text, limit, &a) && atri_integer_compute(type, ATRI_NEG, a, 0, out);
     }
-    if (!length_value(source, ast, e->left, type, depth+1, steps, &a) ||
-        (e->kind == ATRI_EXPR_BINARY && !length_value(source, ast, e->right, type, depth+1, steps, &b))) { return false; }
+    if (!length_value(source, ast, p, d, e->left, type, depth+1, steps, &a) ||
+        (e->kind == ATRI_EXPR_BINARY && !length_value(source, ast, p, d, e->right, type, depth+1, steps, &b))) { return false; }
     if (e->op == ATRI_ADD && e->kind == ATRI_EXPR_UNARY) { *out = a; return true; }
     return atri_integer_compute(type, e->op, a, b, out);
 }
 static bool layout(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, size_t index, size_t depth, AtriDiagnostic *d);
 static bool layout_type(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, AtriIRType type, size_t depth, AtriSpan span, AtriDiagnostic *d) {
+    if (type == ATRI_IR_VOID) { *d = (AtriDiagnostic){span, "void has no object layout"}; return false; }
     if (depth > 256) { *d = (AtriDiagnostic){span, "excessively deep aggregate layout"}; return false; }
     if (atri_ir_is_struct(type)) { return layout(source, ast, p, type-ATRI_IR_STRUCT, depth, d); }
     if (atri_ir_is_array(type)) {
@@ -145,7 +172,11 @@ static bool layout_type(AtriSource source, const AtriProgram *ast, AtriIRProgram
     }
     return true;
 }
-static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, AtriSpan span, AtriIRType *out, AtriDiagnostic *d) {
+static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, AtriSpan span, AtriIRType *out, AtriDiagnostic *d, size_t depth, size_t *steps) {
+    if (depth > 256 || !*steps) {
+        *d = (AtriDiagnostic){span, "layout/type evaluation exceeded its resource limit (possible cyclic query)"}; return false;
+    }
+    --*steps;
     AtriLexer lexer = atri_lexer_create(source); lexer.offset = span.start;
     AtriToken token = atri_lexer_next(&lexer, d);
     if (token.kind == ATRI_TOKEN_STAR) {
@@ -153,7 +184,7 @@ static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram
         AtriToken next = atri_lexer_next(&look, d);
         if (next.kind == ATRI_TOKEN_LEFT_BRACKET) {
             AtriIRType element;
-            if (!source_type(source, ast, p, (AtriSpan){next.span.start, span.end}, &element, d)) { return false; }
+            if (!source_type(source, ast, p, (AtriSpan){next.span.start, span.end}, &element, d, depth+1, steps)) { return false; }
             *out = atri_ir_pointer_type(element); return true;
         }
     }
@@ -163,14 +194,17 @@ static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram
             if (ast->array_types[i].span.start == span.start) { syntax = &ast->array_types[i]; break; }
         }
         uint64_t length;
-        size_t steps = 100000;
-        AtriIRType value_type = syntax ? length_type(source, ast, syntax->length, 0, &steps) : ATRI_IR_INVALID;
+        AtriIRType value_type = syntax ? length_type(source, ast, syntax->length, depth+1, steps) : ATRI_IR_INVALID;
         if (value_type == ATRI_IR_INVALID) { value_type = ATRI_IR_I64; }
-        if (!syntax || !length_value(source, ast, syntax->length, value_type, 0, &steps, &length) || length > 4096) {
-            *d = (AtriDiagnostic){span, "array length requires a nonnegative constant integer up to 4096 (literal or integer constant arithmetic)"}; return false;
+        if (!syntax || !length_value(source, ast, p, d, syntax->length, value_type, depth+1, steps, &length) || length > 4096) {
+            if (!d->message) { *d = (AtriDiagnostic){span, "array length requires a nonnegative constant integer up to 4096 (literal or integer constant arithmetic)"}; }
+            return false;
         }
         AtriIRType element;
-        if (!source_type(source, ast, p, syntax->element, &element, d)) { return false; }
+        if (!source_type(source, ast, p, syntax->element, &element, d, depth+1, steps)) { return false; }
+        if (element == ATRI_IR_VOID || (atri_ir_is_struct(element) && p->structs[element-ATRI_IR_STRUCT].opaque)) {
+            *d = (AtriDiagnostic){syntax->element, "array element requires a complete object type"}; return false;
+        }
         for (size_t i = 0; i < p->array_count; ++i) {
             if (p->arrays[i].element == element && p->arrays[i].length == length) { *out = (AtriIRType)(ATRI_IR_ARRAY+i); return true; }
         }
@@ -195,6 +229,8 @@ static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram
         if (n == 2 && !memcmp(text, "u8", 2)) { type = ATRI_IR_U8; }
         else if (n == 3 && !memcmp(text, "i32", 3)) { type = ATRI_IR_I32; }
         else if (n == 3 && !memcmp(text, "i64", 3)) { type = ATRI_IR_I64; }
+        else if (n == 3 && !memcmp(text, "u64", 3)) { type = ATRI_IR_U64; }
+        else if (n == 4 && !memcmp(text, "void", 4)) { type = ATRI_IR_VOID; }
         else if (n == 4 && !memcmp(text, "bool", 4)) { type = ATRI_IR_BOOL; }
         else if (n == 4 && !memcmp(text, "char", 4)) {
             if (pointers) { *out = ATRI_IR_PTR_CHAR; return true; }
@@ -206,19 +242,20 @@ static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram
         if (structure != ATRI_NONE) { type = (AtriIRType)(ATRI_IR_STRUCT+structure); }
     }
     if (type == ATRI_IR_INVALID) {
-        *d = (AtriDiagnostic){span, "unknown or private type; only u8, i32, i64, bool, supported pointers, fixed arrays and declared structs are supported"}; return false;
+        *d = (AtriDiagnostic){span, "unknown or private type; only u8, i32, i64, u64, bool, supported pointers, fixed arrays and declared structs are supported"}; return false;
     }
     if (pointers) { type = atri_ir_pointer_type(type); }
     if (type == ATRI_IR_INVALID) { *d = (AtriDiagnostic){span, "only pointers to u8, i32, char, arrays and structs are supported"}; return false; }
     *out = type; return true;
 }
 bool atri_type_from_source(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, AtriSpan span, AtriIRType *out, AtriDiagnostic *d) {
-    if (!source_type(source, ast, p, span, out, d)) { return false; }
-    AtriIRType object = atri_ir_is_pointer(*out) ? atri_ir_pointee(*out) : *out;
-    return layout_type(source, ast, p, object, 0, span, d);
+    size_t steps = 100000;
+    if (!source_type(source, ast, p, span, out, d, 0, &steps)) { return false; }
+    return layout_type(source, ast, p, *out, 0, span, d);
 }
 static bool layout(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, size_t index, size_t depth, AtriDiagnostic *d) {
     AtriIRStruct *t = &p->structs[index];
+    if (t->opaque) { *d = (AtriDiagnostic){t->name, "opaque struct has no complete object layout"}; return false; }
     if (t->state == 2) { return true; }
     if (t->state == 1 || depth > 256) { *d = (AtriDiagnostic){ast->structs[index].name, "cyclic or excessively deep by-value struct layout"}; return false; }
     if (t->field_count > 4096) { *d = (AtriDiagnostic){t->name, "struct exceeds the prototype field count limit"}; return false; }
@@ -233,7 +270,8 @@ static bool layout(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, 
                 *d = (AtriDiagnostic){field->name, "duplicate struct field name"}; return false;
             }
         }
-        if (!source_type(source, ast, p, ast->fields[id].type, &field->type, d)) { return false; }
+        size_t steps = 100000;
+        if (!source_type(source, ast, p, ast->fields[id].type, &field->type, d, depth+1, &steps)) { return false; }
         if (!layout_type(source, ast, p, field->type, depth+1, ast->fields[id].type, d)) { return false; }
         size_t alignment = atri_ir_type_align(p, field->type), size = atri_ir_type_size(p, field->type);
         t->size = (t->size+alignment-1)/alignment*alignment;
@@ -252,9 +290,9 @@ bool atri_layout_structs(AtriSource source, const AtriProgram *ast, AtriIRProgra
     p->fields = calloc(p->field_count ? p->field_count : 1, sizeof(*p->fields));
     if (!p->structs || !p->fields) { *d = (AtriDiagnostic){{0}, "out of memory"}; return false; }
     for (size_t i = 0; i < p->struct_count; ++i) {
-        p->structs[i] = (AtriIRStruct){.name = ast->structs[i].name, .first_field = ast->structs[i].first_field, .field_count = ast->structs[i].field_count};
+        p->structs[i] = (AtriIRStruct){.name = ast->structs[i].name, .first_field = ast->structs[i].first_field, .field_count = ast->structs[i].field_count, .opaque = ast->structs[i].opaque, .alignment = 1};
     }
-    for (size_t i = 0; i < p->struct_count; ++i) { if (!layout(source, ast, p, i, 0, d)) { return false; } }
+    for (size_t i = 0; i < p->struct_count; ++i) { if (!p->structs[i].opaque && !layout(source, ast, p, i, 0, d)) { return false; } }
     for (size_t i = 0; i < p->array_count; ++i) {
         if (!layout_type(source, ast, p, (AtriIRType)(ATRI_IR_ARRAY+i), 0, (AtriSpan){0}, d)) { return false; }
     }

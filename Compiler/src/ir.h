@@ -5,14 +5,14 @@
 
 /* 类型描述 IR 值；LOCAL/FIELD/INDEX 例外，type 描述存储内容，本身不能作为普通值或指针使用。 */
 typedef enum { ATRI_IR_I32, ATRI_IR_I64, ATRI_IR_PTR_I32, ATRI_IR_BOOL, ATRI_IR_PTR_CHAR, ATRI_IR_INVALID,
-    ATRI_IR_U8, ATRI_IR_PTR_U8, ATRI_IR_STRUCT = 256, ATRI_IR_ARRAY = 524288, ATRI_IR_PTR_STRUCT = 1048576 } AtriIRType;
+    ATRI_IR_U8, ATRI_IR_PTR_U8, ATRI_IR_U64, ATRI_IR_VOID, ATRI_IR_PTR_VOID, ATRI_IR_STRUCT = 256, ATRI_IR_ARRAY = 524288, ATRI_IR_PTR_STRUCT = 1048576 } AtriIRType;
 typedef enum {
     ATRI_IR_NOP, ATRI_IR_PARAM, ATRI_IR_CONST, ATRI_IR_UNARY,
     ATRI_IR_BINARY, ATRI_IR_CALL, ATRI_IR_RETURN,
     ATRI_IR_LOCAL, ATRI_IR_LOAD, ATRI_IR_STORE,
     ATRI_IR_PTR_OFFSET, ATRI_IR_PTR_DIFF, ATRI_IR_ADDRESS, ATRI_IR_COMPARE,
     ATRI_IR_LABEL, ATRI_IR_JUMP, ATRI_IR_BRANCH, ATRI_IR_UNREACHABLE, ATRI_IR_STRING, ATRI_IR_ZERO, ATRI_IR_FIELD,
-    ATRI_IR_INDEX, ATRI_IR_LAZY_SELECT,
+    ATRI_IR_INDEX, ATRI_IR_CAST, ATRI_IR_C_PROMOTE, ATRI_IR_LAZY_SELECT,
     ATRI_IR_LAZY_LOGICAL /* 常量初始化中的私有短路指令，公开可执行 IR 中不允许保留。 */
 } AtriIRKind;
 typedef struct {
@@ -47,6 +47,7 @@ typedef struct {
     size_t constant_count, constant_capacity;
     size_t block_count; /* 入口块 0 隐含存在，其余块由 LABEL.immediate 标识，物理顺序可以不同。 */
     AtriId module;
+    bool variadic;
     bool external_c; /* 只有完整签名，不拥有函数体；链接符号使用源码名称。 */
 } AtriIRFunction;
 typedef struct {
@@ -56,7 +57,7 @@ typedef struct {
 typedef struct { AtriSpan name; AtriIRType type; uint64_t bits; bool constant; } AtriIRGlobal;
 
 typedef struct { AtriSpan name; AtriIRType type; size_t offset; uint64_t default_bits; } AtriIRField;
-typedef struct { AtriSpan name; size_t first_field, field_count, size, alignment; unsigned state; } AtriIRStruct;
+typedef struct { AtriSpan name; size_t first_field, field_count, size, alignment; unsigned state; bool opaque; } AtriIRStruct;
 typedef struct { AtriIRType element; size_t length; } AtriIRArray;
 typedef struct {
     AtriIRArray *arrays;
@@ -101,6 +102,7 @@ bool atri_ir_is_pointer(AtriIRType type);
 bool atri_ir_has_value(AtriIRKind kind);
 bool atri_compare(AtriIRType type, AtriOp op, uint64_t a, uint64_t b);
 const char *atri_ir_type_name(AtriIRType type);
+uint64_t atri_integer_convert(AtriIRType source, AtriIRType target, uint64_t bits);
 bool atri_integer_compute(AtriIRType type, AtriOp op, uint64_t a, uint64_t b, uint64_t *result);
 /* 除零及有符号最小值 / 或 % -1 返回 false；其余结果按目标位模式保存。 */
 bool atri_i32_compute(AtriOp op, uint32_t a, uint32_t b, uint32_t *result);

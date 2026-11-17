@@ -49,12 +49,13 @@ static bool bind(Lower *l, Binding b) {
 static bool emit(Lower *l, AtriIRInst inst, AtriId *id) {
     return atri_ir_append(l->function, inst, id) || error(l, inst.span, "out of memory while lowering IR");
 }
-static bool literal(Lower *l, AtriSpan text, uint64_t limit, uint64_t *out) {
+static bool literal(Lower *l, AtriSpan text, AtriIRType type, uint64_t limit, uint64_t *out) {
     uint64_t value = 0;
     for (size_t i = text.start; i < text.end; ++i) {
         unsigned digit = (unsigned)(l->source.text[i] - '0');
-        if (value > (limit - digit) / 10) return error(l, text, limit <= UINT32_MAX ?
-            "integer literal is outside the i32 range" : "integer literal is outside the i64 range");
+        if (value > (limit - digit) / 10) return error(l, text, type == ATRI_IR_U8 ? "integer literal is outside the u8 range" :
+            type == ATRI_IR_U64 ? "integer literal is outside the u64 range" :
+            type == ATRI_IR_I32 ? "integer literal is outside the i32 range" : "integer literal is outside the i64 range");
         value = value * 10 + digit;
     }
     *out = value; return true;
@@ -121,6 +122,7 @@ static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out);
 static bool store(Lower *l, AtriId pointer, AtriId value, AtriSpan span);
 static bool nonnull(Lower *l, AtriId pointer, AtriSpan span);
 static AtriIRType infer_type(Lower *l, AtriId id, AtriIRType hint);
+static bool c_value_compatible(const AtriIRProgram *p, AtriIRType type);
 static AtriId field_index(Lower *l, AtriIRType type, AtriSpan name) {
     if (!atri_ir_is_struct(type)) { return ATRI_NONE; }
     const AtriIRStruct *t = &l->ir->structs[type-ATRI_IR_STRUCT];
@@ -164,7 +166,7 @@ static bool location(Lower *l, AtriId id, bool write, AtriIRType *type, AtriId *
         }
         AtriIRArray array = l->ir->arrays[base_type-ATRI_IR_ARRAY];
         AtriIRType index_type = infer_type(l, e->right, ATRI_IR_I64);
-        if (index_type != ATRI_IR_I32 && index_type != ATRI_IR_I64) { return error(l, e->span, "array index requires i32 or i64"); }
+        if (index_type != ATRI_IR_I32 && index_type != ATRI_IR_I64 && index_type != ATRI_IR_U64) { return error(l, e->span, "array index requires i32, i64 or u64"); }
         if (!expression(l, e->right, index_type, &index)) { return false; }
         *type = array.element;
         return emit(l, (AtriIRInst){.kind = ATRI_IR_INDEX, .type = *type, .left = base, .right = index, .span = e->span}, out);
@@ -172,7 +174,9 @@ static bool location(Lower *l, AtriId id, bool write, AtriIRType *type, AtriId *
     if (e->kind == ATRI_EXPR_DEREFERENCE) {
         AtriIRType pointer = infer_type(l, e->left, ATRI_IR_INVALID);
         *type = atri_ir_pointee(pointer);
-        if (*type == ATRI_IR_INVALID) { return error(l, e->span, "type mismatch: dereference requires an i32 or struct pointer"); }
+        if (*type == ATRI_IR_INVALID || *type == ATRI_IR_VOID || !atri_ir_valid_type(l->ir, *type)) {
+            return error(l, e->span, "type mismatch: dereference requires a pointer to a complete object; void and opaque targets cannot be dereferenced");
+        }
         return expression(l, e->left, pointer, out) && nonnull(l, *out, e->span);
     }
     if (e->kind == ATRI_EXPR_FIELD) {
@@ -333,10 +337,27 @@ static bool run_expression(Lower *l, const AtriExpr *e, AtriIRType expected, Atr
         &l->function->constant_capacity, sizeof(obligation), &obligation)) { return error(l, e->span, "out of memory"); }
     *out = result; return true;
 }
+static AtriIRType integer_type_name(Lower *l, AtriSpan span) {
+    size_t n = span.end-span.start;
+    const char *name = l->source.text+span.start;
+    return n == 2 && !memcmp(name, "u8", 2) ? ATRI_IR_U8 :
+        n == 3 && !memcmp(name, "i32", 3) ? ATRI_IR_I32 :
+        n == 3 && !memcmp(name, "i64", 3) ? ATRI_IR_I64 :
+        n == 3 && !memcmp(name, "u64", 3) ? ATRI_IR_U64 : ATRI_IR_INVALID;
+}
+static AtriIRType conversion_type(Lower *l, AtriSpan span) {
+    AtriIRType target = integer_type_name(l, span);
+    if (target == ATRI_IR_INVALID && l->source.text[span.start] == '*') {
+        if (!type(l, span, &target) || !atri_ir_is_pointer(target)) { return ATRI_IR_INVALID; }
+    }
+    return target;
+}
 /* 仅预测类型，不生成指令或提前执行实参，避免改变副作用顺序；无上下文的字面量暂不定型。 */
 static AtriIRType infer_type(Lower *l, AtriId id, AtriIRType hint) {
     const AtriExpr *e = &l->ast->expressions[id];
     switch (e->kind) {
+        case ATRI_EXPR_CAST: return conversion_type(l, e->text);
+        case ATRI_EXPR_SIZEOF: case ATRI_EXPR_ALIGNOF: return ATRI_IR_U64;
         case ATRI_EXPR_RUN: return infer_type(l, e->left, hint);
         case ATRI_EXPR_CONDITIONAL: {
             AtriIRType yes = infer_type(l, e->right, hint);
@@ -374,6 +395,7 @@ static AtriIRType infer_type(Lower *l, AtriId id, AtriIRType hint) {
                 return e->op == ATRI_SUB && atri_ir_is_pointer(a) && atri_ir_is_pointer(b) ?
                     ATRI_IR_I64 : atri_ir_is_pointer(a) ? a : b;
             }
+            if (a == ATRI_IR_U64 || b == ATRI_IR_U64) return ATRI_IR_U64;
             if (a == ATRI_IR_I64 || b == ATRI_IR_I64) return ATRI_IR_I64;
             if (a == ATRI_IR_I32 || b == ATRI_IR_I32) return ATRI_IR_I32;
             if (a == ATRI_IR_U8 || b == ATRI_IR_U8) return ATRI_IR_U8;
@@ -384,6 +406,9 @@ static AtriIRType infer_type(Lower *l, AtriId id, AtriIRType hint) {
 }
 static bool nonnull(Lower *l, AtriId pointer, AtriSpan span) {
     const AtriIRInst *v = &l->function->instructions[pointer];
+    while (v->kind == ATRI_IR_CAST && atri_ir_is_pointer(v->type)) {
+        v = &l->function->instructions[v->left];
+    }
     if (v->kind == ATRI_IR_CONST && v->immediate == 0)
         return error(l, span, "cannot dereference a statically known null pointer");
     return true;
@@ -414,6 +439,29 @@ static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out) {
     AtriIRInst inst = {.span = e->span, .type = ATRI_IR_I32};
     bool ok = false;
     switch (e->kind) {
+        case ATRI_EXPR_CAST: {
+            AtriIRType target = conversion_type(l, e->text);
+            if (!atri_ir_is_integer(target) && !atri_ir_is_pointer(target)) {
+                error(l, e->text, "explicit conversions require an integer target or data pointer target type"); break;
+            }
+            if (atri_ir_is_pointer(target) && l->ast->expressions[e->left].kind == ATRI_EXPR_NULL) {
+                inst.kind = ATRI_IR_CONST; inst.type = target; ok = emit(l, inst, out); break;
+            }
+            if (atri_ir_is_pointer(target) && l->constant_context) { error(l, e->span, "compile-time pointer conversions are not supported yet"); break; }
+            if (!expression(l, e->left, ATRI_IR_INVALID, &inst.left)) { break; }
+            AtriIRType source = l->function->instructions[inst.left].type;
+            if (atri_ir_is_integer(target) ? !atri_ir_is_integer(source) : !atri_ir_is_pointer(source)) {
+                error(l, e->span, "cast requires integer operands for integer conversions or pointer operands for data pointer conversions"); break;
+            }
+            inst.kind = ATRI_IR_CAST; inst.type = target; ok = emit(l, inst, out); break;
+        }
+        case ATRI_EXPR_SIZEOF: case ATRI_EXPR_ALIGNOF: {
+            AtriIRType object;
+            if (!type(l, e->text, &object)) { break; }
+            inst.kind = ATRI_IR_CONST; inst.type = ATRI_IR_U64;
+            inst.immediate = e->kind == ATRI_EXPR_SIZEOF ? atri_ir_type_size(l->ir, object) : atri_ir_type_align(l->ir, object);
+            ok = emit(l, inst, out); break;
+        }
         case ATRI_EXPR_RUN: ok = run_expression(l, e, expected, out); break;
         case ATRI_EXPR_CONDITIONAL: ok = conditional(l, e, expected, out); break;
         case ATRI_EXPR_STRING: ok = string_literal(l, e, out); break;
@@ -423,7 +471,7 @@ static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out) {
         case ATRI_EXPR_INTEGER:
             inst.kind = ATRI_IR_CONST;
             inst.type = atri_ir_is_integer(expected) ? expected : ATRI_IR_I32;
-            if (literal(l, e->text, inst.type == ATRI_IR_U8 ? UINT8_MAX : inst.type == ATRI_IR_I64 ? (uint64_t)INT64_MAX : INT32_MAX, &inst.immediate)) ok = emit(l, inst, out);
+            if (literal(l, e->text, inst.type, inst.type == ATRI_IR_U64 ? UINT64_MAX : inst.type == ATRI_IR_U8 ? UINT8_MAX : inst.type == ATRI_IR_I64 ? (uint64_t)INT64_MAX : INT32_MAX, &inst.immediate)) ok = emit(l, inst, out);
             break;
         case ATRI_EXPR_NULL:
             if (!atri_ir_is_pointer(expected)) {
@@ -481,7 +529,7 @@ static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out) {
             if (e->op == ATRI_ADD) { ok = expression(l, e->left, inst.type, out); break; }
             if (l->ast->expressions[e->left].kind == ATRI_EXPR_INTEGER) {
                 inst.kind = ATRI_IR_CONST;
-                if (!literal(l, l->ast->expressions[e->left].text, inst.type == ATRI_IR_U8 ? UINT8_MAX : inst.type == ATRI_IR_I64 ? (UINT64_C(1) << 63) : UINT32_C(2147483648), &inst.immediate)) break;
+                if (!literal(l, l->ast->expressions[e->left].text, inst.type, inst.type == ATRI_IR_U64 ? UINT64_MAX : inst.type == ATRI_IR_U8 ? UINT8_MAX : inst.type == ATRI_IR_I64 ? (UINT64_C(1) << 63) : UINT32_C(2147483648), &inst.immediate)) break;
                 uint64_t negated;
                 if (!atri_integer_compute(inst.type, ATRI_NEG, inst.immediate, 0, &negated)) break;
                 inst.immediate = negated; ok = emit(l, inst, out);
@@ -508,6 +556,11 @@ static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out) {
                 break;
             }
             if (atri_ir_is_pointer(a) || atri_ir_is_pointer(b)) {
+                AtriIRType pointer = atri_ir_is_pointer(a) ? a : b;
+                AtriIRType target = atri_ir_pointee(pointer);
+                if (pointer != ATRI_IR_PTR_CHAR && (target == ATRI_IR_VOID || !atri_ir_valid_type(l->ir, target) || !atri_ir_type_size(l->ir, target))) {
+                    error(l, e->span, "pointer arithmetic on zero-size or incomplete targets is not defined"); break;
+                }
                 if (e->op != ATRI_ADD && e->op != ATRI_SUB) {
                     error(l, e->span, "pointer arithmetic supports only pointer +/- integer and pointer - pointer"); break;
                 }
@@ -526,6 +579,9 @@ static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out) {
                 } else {
                     AtriIRType pointer_type = atri_ir_is_pointer(a) ? a : b;
                     AtriIRType offset_type = atri_ir_is_pointer(a) ? b : a;
+                    if (offset_type == ATRI_IR_U64 || offset_type == ATRI_IR_U8) {
+                        error(l, e->span, "pointer offset requires i32 or i64; use an explicit integer conversion"); break;
+                    }
                     if (!atri_ir_is_integer(offset_type)) offset_type = ATRI_IR_I64;
                     AtriId left, right;
                     /* n+p 的 IR 统一保存为“指针、偏移”，但求值顺序仍须先 n 后 p。 */
@@ -558,12 +614,23 @@ static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out) {
             AtriId callee = resolve_declaration(l, e, false);
             if (callee == ATRI_NONE) { error(l, e->text, "unknown function name"); break; }
             const AtriIRFunction *f = &l->ir->functions[callee];
-            if (e->argument_count != f->parameter_count) { error(l, e->span, "function argument count does not match its signature"); break; }
+            if (e->argument_count < f->parameter_count || (!f->variadic && e->argument_count != f->parameter_count)) { error(l, e->span, "function argument count does not match its signature"); break; }
             AtriId *args = e->argument_count == 0 ? NULL : malloc(e->argument_count * sizeof(*args));
             if (e->argument_count != 0 && args == NULL) { error(l, e->span, "out of memory"); break; }
             ok = true;
-            for (size_t a = 0; a < e->argument_count; ++a)
-                if (!expression(l, l->ast->arguments[e->first_argument + a], f->parameter_types[a], &args[a])) { ok = false; break; }
+            for (size_t a = 0; a < e->argument_count; ++a) {
+                AtriId operand = l->ast->arguments[e->first_argument+a];
+                AtriIRType expected_argument = a < f->parameter_count ? f->parameter_types[a] : ATRI_IR_INVALID;
+                if (!expression(l, operand, expected_argument, &args[a])) { ok = false; break; }
+                if (a < f->parameter_count) { continue; }
+                AtriIRType argument = l->function->instructions[args[a]].type;
+                AtriSpan span = l->ast->expressions[operand].span;
+                if (argument == ATRI_IR_U8 || argument == ATRI_IR_BOOL) {
+                    if (!emit(l, (AtriIRInst){.kind = ATRI_IR_C_PROMOTE, .type = ATRI_IR_I32, .left = args[a], .span = span}, &args[a])) { ok = false; break; }
+                } else if (argument == ATRI_IR_VOID || atri_ir_is_array(argument) || !c_value_compatible(l->ir, argument)) {
+                    ok = error(l, span, "variadic argument requires a supported C ABI value; arrays require an explicit element pointer"); break;
+                }
+            }
             inst.kind = ATRI_IR_CALL; inst.callee = callee; inst.type = f->return_type;
             inst.first_argument = l->function->argument_count; inst.argument_count = e->argument_count;
             for (size_t a = 0; ok && a < e->argument_count; ++a)
@@ -599,6 +666,14 @@ static bool block(Lower *l, AtriId id, bool nested) {
 }
 static bool simple(Lower *l, const AtriStatement *s) {
     if (s->kind == ATRI_STMT_EXPR) { AtriId ignored; return expression(l, s->expression, ATRI_IR_INVALID, &ignored); }
+    if (s->kind == ATRI_STMT_RETURN) {
+        if (l->function->return_type == ATRI_IR_VOID) {
+            if (s->expression != ATRI_NONE) { return error(l, s->span, "void functions require 'return;' without a value"); }
+            AtriId ignored; l->closed = true;
+            return emit(l, (AtriIRInst){.kind = ATRI_IR_RETURN, .type = ATRI_IR_VOID, .left = ATRI_NONE, .span = s->span}, &ignored);
+        }
+        if (s->expression == ATRI_NONE) { return error(l, s->span, "non-void functions must return a value"); }
+    }
     AtriIRType expected;
     AtriId destination = ATRI_NONE, binding = ATRI_NONE;
     bool declaration = s->kind == ATRI_STMT_VARIABLE || s->kind == ATRI_STMT_CONSTANT;
@@ -660,8 +735,12 @@ static bool simple(Lower *l, const AtriStatement *s) {
         if (destination != ATRI_NONE) return store(l, destination, value, s->span);
         l->bindings[binding].value = value; return true;
     }
-    if (atri_ir_is_pointer(expected) && l->function->instructions[value].kind == ATRI_IR_ADDRESS) {
-        AtriId origin = l->function->instructions[value].left;
+    AtriId returned = value;
+    while (l->function->instructions[returned].kind == ATRI_IR_CAST && atri_ir_is_pointer(l->function->instructions[returned].type)) {
+        returned = l->function->instructions[returned].left;
+    }
+    if (atri_ir_is_pointer(expected) && l->function->instructions[returned].kind == ATRI_IR_ADDRESS) {
+        AtriId origin = l->function->instructions[returned].left;
         while (l->function->instructions[origin].kind == ATRI_IR_FIELD || l->function->instructions[origin].kind == ATRI_IR_INDEX) { origin = l->function->instructions[origin].left; }
         if (l->function->instructions[origin].kind == ATRI_IR_LOCAL && l->function->instructions[origin].immediate == 0) {
             return error(l, s->span, "cannot directly return the address of a local variable");
@@ -767,6 +846,11 @@ static bool known_integer(const AtriIRFunction *f, AtriId id, size_t depth, size
     --*steps;
     const AtriIRInst *v = &f->instructions[id];
     if (v->kind == ATRI_IR_CONST) { *out = v->immediate; return true; }
+    if (v->kind == ATRI_IR_CAST) {
+        uint64_t source;
+        if (!known_integer(f, v->left, depth+1, steps, &source)) { return false; }
+        *out = atri_integer_convert(f->instructions[v->left].type, v->type, source); return true;
+    }
     if (v->kind != ATRI_IR_UNARY && v->kind != ATRI_IR_BINARY) { return false; }
     uint64_t a, b = 0;
     return known_integer(f, v->left, depth+1, steps, &a) &&
@@ -786,6 +870,10 @@ static bool check_array_indices(Lower *l) {
             if (!array.length) { return error(l, v->span, "array index is statically out of bounds"); }
             size_t steps = 100000;
             if (known_integer(f, v->right, 0, &steps, &bits)) {
+                if (f->instructions[v->right].type == ATRI_IR_U64) {
+                    if (bits >= array.length) { return error(l, v->span, "array index is statically out of bounds"); }
+                    continue;
+                }
                 int64_t index = f->instructions[v->right].type == ATRI_IR_I32 ? atri_i32_signed((uint32_t)bits) : atri_i64_signed(bits);
                 if (index < 0 || (uint64_t)index >= array.length) { return error(l, v->span, "array index is statically out of bounds"); }
             }
@@ -840,8 +928,10 @@ bool atri_lower(AtriSource source, const AtriProgram *ast, AtriIRProgram *out, A
         const AtriFunction *f = &ast->functions[i];
         AtriIRFunction *signature = &ir.functions[i];
         signature->module = atri_module_at(ast, f->name.start); signature->name = f->name; signature->parameter_count = f->parameter_count;
-        signature->external_c = f->external_c; signature->block_count = f->external_c ? 0 : 1;
-        if (!type(&l, f->return_type, &signature->return_type)) goto failure;
+        signature->external_c = f->external_c; signature->variadic = f->variadic; signature->block_count = f->external_c ? 0 : 1;
+        if (f->return_type.end-f->return_type.start == 4 && !memcmp(source.text+f->return_type.start, "void", 4)) {
+            signature->return_type = ATRI_IR_VOID;
+        } else if (!type(&l, f->return_type, &signature->return_type)) { goto failure; }
         if (f->external_c && (atri_ir_is_array(signature->return_type) || !c_value_compatible(&ir, signature->return_type))) { error(&l, f->return_type, "arrays and zero-size structs have no C by-value ABI"); goto failure; }
         signature->parameter_types = calloc(f->parameter_count ? f->parameter_count : 1, sizeof(*signature->parameter_types));
         if (!signature->parameter_types) { error(&l, f->name, "out of memory"); goto failure; }
@@ -872,7 +962,9 @@ bool atri_lower(AtriSource source, const AtriProgram *ast, AtriIRProgram *out, A
         if (!block(&l, f->block, false)) goto failure;
         if (!l.closed) {
             AtriId ignored;
-            if (!emit(&l, (AtriIRInst){.kind = ATRI_IR_UNREACHABLE, .span = f->body}, &ignored)) goto failure;
+            AtriIRInst end = {.kind = ATRI_IR_UNREACHABLE, .span = f->body};
+            if (l.function->return_type == ATRI_IR_VOID) { end.kind = ATRI_IR_RETURN; end.type = ATRI_IR_VOID; end.left = ATRI_NONE; }
+            if (!emit(&l, end, &ignored)) { goto failure; }
         }
     }
     /* 全局静态初始化借用同一常量解释器；临时函数在求值完成后删除。 */

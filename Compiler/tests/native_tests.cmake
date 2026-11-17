@@ -8,7 +8,7 @@ function(run_checked)
 endfunction()
 
 function(expect_exit executable expected)
-    execute_process(COMMAND "${executable}" RESULT_VARIABLE actual OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
+    execute_process(COMMAND "${executable}" ${ARGN} RESULT_VARIABLE actual OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
     if(NOT "${actual}" STREQUAL "${expected}")
         message(FATAL_ERROR "${executable}\nExpected exit: ${expected}\nActual exit: ${actual}\n${out}\n${err}")
     endif()
@@ -17,7 +17,8 @@ endfunction()
 function(expect_stdout executable expected)
     # 写文件后按字节读取，验证 UTF-8 数据而不依赖终端当前代码页。
     set(output "${executable}.stdout")
-    execute_process(COMMAND "${executable}" RESULT_VARIABLE status OUTPUT_FILE "${output}" ERROR_VARIABLE err TIMEOUT 10)
+    execute_process(COMMAND "${executable}" RESULT_VARIABLE status OUTPUT_FILE "${output}" ERROR_VARIABLE err
+        WORKING_DIRECTORY "${SOURCE_DIR}" TIMEOUT 10)
     file(READ "${output}" actual)
     string(REPLACE "\r\n" "\n" actual "${actual}")
     if(NOT "${status}" STREQUAL "0" OR NOT "${actual}" STREQUAL "${expected}" OR NOT "${err}" STREQUAL "")
@@ -72,9 +73,9 @@ function(run_library source harness)
     set(executable "${OUTPUT_DIR}/${name}-${level}.exe")
     run_checked("${BINDINGS_GENERATOR}" "${SOURCE_DIR}/${source}" "${bindings}")
     run_checked("${COMPILER}" "-${level}" -S -o "${assembly}" "${SOURCE_DIR}/${source}")
-    run_checked("${CLANG}" "${assembly}" "${SOURCE_DIR}/tests/${harness}"
+    run_checked("${CLANG}" -std=c23 "${assembly}" "${SOURCE_DIR}/tests/${harness}"
         "-I${OUTPUT_DIR}" "-I${SOURCE_DIR}/tests" -o "${executable}")
-    expect_exit("${executable}" 0)
+    expect_exit("${executable}" 0 ${ARGN})
 endfunction()
 
 # 文本输出不能伪装成可执行文件，也不能在报错前截断用户已有的产物。
@@ -91,7 +92,16 @@ foreach(output_name text-output.exe text-output.ExE)
 endforeach()
 
 # 每项只列源码和期望返回值；两种等级分别编译执行，验证优化效果时仍需保留行为检查。
+file(READ "${SOURCE_DIR}/examples/main.ar" read_file_expected)
+string(REPLACE "\r\n" "\n" read_file_expected "${read_file_expected}")
 foreach(level O0 O1)
+    file(MAKE_DIRECTORY "${OUTPUT_DIR}/stdio-${level}")
+    run_library("tests/cases/c_variadic.ar" "variadic_harness.c"
+        "${OUTPUT_DIR}/stdio-${level}/roundtrip.bin" "${OUTPUT_DIR}/stdio-${level}/missing.bin")
+    run_program("examples/read_file.ar" 0 "${read_file_expected}")
+    run_program("examples/variadic.ar" 0 "255 1 -7 18446744073709551615 ok\n")
+    run_program("examples/conversions.ar" 0)
+    run_library("tests/cases/conversions.ar" "conversion_harness.c")
     run_program("tests/cases/arrays_run.ar" 0)
     run_program("examples/run_constants.ar" 2)
     expect_direct_return("${OUTPUT_DIR}/run_constants-${level}.s" 2)
@@ -190,3 +200,5 @@ expect_compile_error("tests/cases/structs/equality.ar" "not automatically define
 expect_compile_error("tests/cases/structs/global_struct.ar" "global struct storage")
 expect_compile_error("tests/cases/structs/constant_struct.ar" "struct constants")
 expect_compile_error("tests/cases/structs/aggregate_default.ar" "aggregate field default")
+
+expect_compile_error("tests/cases/void_main.ar" "hosted main must return i32")

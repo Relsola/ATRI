@@ -1,0 +1,10 @@
+// FILE 由 C 运行库管理，ATRI 只保存和传递指针，不访问内部布局。
+export struct FILE;
+
+export [[extern(C)]] fn fopen(path: *char, mode: *char) -> *FILE;
+export [[extern(C)]] fn fread(buffer: *void, size: u64, count: u64, stream: *FILE) -> u64;
+export [[extern(C)]] fn fwrite(buffer: *void, size: u64, count: u64, stream: *FILE) -> u64;
+export [[extern(C)]] fn fclose(stream: *FILE) -> i32;
+export [[extern(C)]] fn ferror(stream: *FILE) -> i32;
+export [[extern(C)]] fn feof(stream: *FILE) -> i32;
+export [[extern(C)]] fn printf(format: *char, ...) -> i32;

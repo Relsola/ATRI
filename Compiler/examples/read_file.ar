@@ -1,0 +1,28 @@
+stdio :: import "c_stdio";
+
+fn print_file(path: *char) -> i32 {
+    stream: *stdio::FILE = stdio::fopen(path, "r");
+    if (stream == null) {
+        return 1;
+    }
+    buffer: [256]u8;
+    loop {
+        count: u64 = stdio::fread(cast(*void, &buffer[0]), 1, sizeof([256]u8), stream);
+        if (count == 0) {
+            break;
+        }
+        // 按本次读取长度输出文本，不假设 fread 自动补充 NUL。
+        if (stdio::printf("%.*s", cast(i32, count), cast(*char, &buffer[0])) < 0) {
+            stdio::fclose(stream);
+            return 2;
+        }
+    }
+    failed: bool = stdio::ferror(stream) != 0;
+    closed: i32 = stdio::fclose(stream);
+    return failed || closed != 0 ? 3 : 0;
+}
+
+fn main() -> i32 {
+    // 从 Compiler 目录运行；路径由调用方传入 print_file，可替换为自己的文本文件。
+    return print_file("examples/main.ar");
+}

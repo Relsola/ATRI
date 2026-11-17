@@ -103,8 +103,22 @@ AST 结构检查保留在前端测试；跳转目标、支配关系、访存类�
 
 [cases/arrays_run.ar](cases/arrays_run.ar) 在 -O0/-O1 下编译、链接、原生执行，覆盖局部长度常量/遮蔽、数组默认/部分/嵌套初始化、初始化求值顺序、复制、参数/返回、数组指针、嵌套索引与字段写入、零大小元素、u8 环绕/无符号除余和短路条件表达式。结构化例子与运行期调用副作用用于验证实际路径，不把 IR 常量断言当作机器执行结果。
 
-[run_constants.ar](../examples/run_constants.ar) 验证用户的 max 示例：两种优化等级下均只输出 main，直接返回 2。compiler 测试另核对优化前 IR 已无运行期调用，run 不得读取运行期变量/参数或执行 extern(C)，以及条件表达式未选分支不执行。run 声明使用 :=，单独的 run 表达式支持整数/bool；代码块、AST API 与聚合求值不在本轮验收内。
+[run_constants.ar](../examples/run_constants.ar) 验证用户的 max 示例：两种优化等级下均只输出 main，直接返回 2。compiler 测试另核对优化前 IR 已无运行期调用，run 不得读取运行期变量/参数或执行 extern(C)，以及条件表达式未选分支不执行。run 声明支持 `=` 可变绑定和 `:=` 常量绑定，单独的 run 表达式支持整数/bool；arrays_run 原生用例覆盖顶层/局部可变结果写入和 for 初始化，frontend/compiler 检查完整初始化器范围、缺失初始化器及非法编译期输入。代码块、AST API 与聚合求值不在本轮验收内。
 
 [array_harness.c](array_harness.c) 对 [array_abi.ar](cases/array_abi.ar) 做双向 C 调用，核对 u8 的寄存器/栈参数、返回与指针写入，以及内嵌数组的 4/24 字节结构体布局、参数和返回。测试绑定生成器按元素类型与维度生成 C 字段声明，不伪造 C 按值数组参数。
 
 compiler/front-end 测试覆盖索引静态越界、零长度访问、初始化过量/错误形式、只读参数、临时值写入、数组类型不匹配、运行期长度、递归布局及字节范围。Verifier 另构造错误索引类型/引用和循环数组描述，不能用 native 用例代替这些不变量检查。当前无动态越界检查、性能测量或复制最少证明。
+
+## 整数转换与目标布局查询回归
+
+[conversions.ar](../examples/conversions.ar) 和 [conversion_harness.c](conversion_harness.c) 在 -O0/-O1 下编译、链接并原生执行。驱动调用 [cases/conversions.ar](cases/conversions.ar)，核对负 i32 的符号扩展、u8 零扩展、低位截断、同宽符号解释、u64 最高位/最大值的加减乘负号、无符号排序与除余、嵌套转换及 C 寄存器/栈参数和返回。示例另核对零大小结构体/数组及目标自然对齐，不把零大小类型伪造为 C 测试绑定。
+
+compiler/front-end 测试核对 `cast(Type, expression)` 的类型和 AST、静态常量/标量 run 结果、无隐式转换、禁用 bool 整数/指针整数转换、字面量范围、旧语法拒绝及 sizeof/alignof 的完整对象类型要求。布局查询参与数组长度，按值循环和嵌套查询资源耗尽必须诊断；Verifier 另构造错误目标类型与自引用 cast。测试通过不表示已支持其余整数位宽、*u64、浮点转换、额外 cast 模式或完整 C ABI，也不代表性能测量。
+
+## C 可变参数、void 与标准库文件回归
+
+[variadic_harness.c](variadic_harness.c) 对 [cases/c_variadic.ar](cases/c_variadic.ar) 在 -O0/-O1 下做真实 C va_arg 验证，覆盖 u8/bool 默认提升、i32/i64/u64、数据指针、小/大结构体、寄存器与栈尾参、隐藏返回参数平移、void 调用/返回和实参副作用顺序。独立编译的 C 驱动使用 C23，以允许纯 ellipsis 声明。默认提升有单独 IR 指令，不将 bool 整数转换开放为普通语言行为；Verifier 构造未提升尾参、错误 promotion/void return 与非法 opaque 布局。
+
+文件用例在本次 OUTPUT_DIR 下创建和删除测试文件：由 C 写入 257 字节（含 NUL、CR/LF 和高位字节），由 ATRI 使用 fopen/fread 分块读取并验证返回计数、EOF/ferror、缺失文件及 fclose，再由 ATRI fwrite 写回 4 字节交由 C 检查。数据文件不写入源码或仓库根。[read_file.ar](../examples/read_file.ar) 的 stdout 与读取的源码文本核对；[variadic.ar](../examples/variadic.ar) 的 printf stdout 为 `255 1 -7 18446744073709551615 ok` 加换行。
+
+前端和编译器诊断覆盖 ellipsis 位置/定义端拒绝、固定前缀数量/类型、数组与零大小尾参、opaque 对象使用、void 对象/返回使用、*void 访问/算术及数据指针 cast 的有限 null/局部地址返回检查。原有尖括号/C 式转换和指针整数转换仍不接受，运行期 C 调用也不能在 run 中执行。本轮不覆盖浮点尾参、va_list 定义端、printf 格式静态校验、宽字符路径或完整 C ABI。

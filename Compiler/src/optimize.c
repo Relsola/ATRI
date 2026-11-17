@@ -5,6 +5,13 @@ static bool diagnostic(AtriDiagnostic *d, AtriSpan span, const char *message) {
     *d = (AtriDiagnostic){span, message}; return false;
 }
 static bool emit_fold(AtriIRFunction *out, AtriIRInst inst, AtriId *id, AtriDiagnostic *d) {
+    if (inst.kind == ATRI_IR_C_PROMOTE && out->instructions[inst.left].kind == ATRI_IR_CONST) {
+        inst.immediate = out->instructions[inst.left].immediate; inst.kind = ATRI_IR_CONST;
+    }
+    if (inst.kind == ATRI_IR_CAST && atri_ir_is_integer(inst.type) && out->instructions[inst.left].kind == ATRI_IR_CONST) {
+        inst.immediate = atri_integer_convert(out->instructions[inst.left].type, inst.type, out->instructions[inst.left].immediate);
+        inst.kind = ATRI_IR_CONST;
+    }
     if (inst.kind == ATRI_IR_COMPARE && out->instructions[inst.left].kind == ATRI_IR_CONST &&
         out->instructions[inst.right].kind == ATRI_IR_CONST) {
         inst.immediate = atri_compare(out->instructions[inst.left].type, inst.op,
@@ -38,7 +45,7 @@ static bool emit_fold(AtriIRFunction *out, AtriIRInst inst, AtriId *id, AtriDiag
     return atri_ir_append(out, inst, id) || diagnostic(d, inst.span, "out of memory during optimization");
 }
 static bool is_leaf(const AtriIRFunction *f) {
-    if (f->external_c || f->block_count > 1) {
+    if (f->external_c || f->return_type == ATRI_IR_VOID || f->block_count > 1) {
         return false;
     }
     if (f->return_type >= ATRI_IR_STRUCT) { return false; }
@@ -66,7 +73,7 @@ static bool inline_leaf(AtriIRFunction *out, const AtriIRFunction *callee,
         if (inst.kind == ATRI_IR_PTR_OFFSET || inst.kind == ATRI_IR_PTR_DIFF) {
             inst.left = map[inst.left]; inst.right = map[inst.right];
         }
-        if (inst.kind == ATRI_IR_UNARY) inst.left = map[inst.left];
+        if (inst.kind == ATRI_IR_UNARY || inst.kind == ATRI_IR_CAST || inst.kind == ATRI_IR_C_PROMOTE) inst.left = map[inst.left];
         if (!emit_fold(out, inst, &map[i], d)) { ok = false; break; }
     }
     free(map); return ok;
@@ -80,7 +87,7 @@ static bool eliminate_dead(AtriIRFunction *f, AtriDiagnostic *d) {
         AtriIRInst *v = &f->instructions[i];
         if (v->kind == ATRI_IR_RETURN || v->kind == ATRI_IR_CALL || v->kind == ATRI_IR_STORE) live[i] = true;
         if (!live[i]) { v->kind = ATRI_IR_NOP; continue; }
-        if (v->kind == ATRI_IR_UNARY || v->kind == ATRI_IR_BINARY || v->kind == ATRI_IR_RETURN ||
+        if (v->kind == ATRI_IR_C_PROMOTE || v->kind == ATRI_IR_CAST || v->kind == ATRI_IR_UNARY || v->kind == ATRI_IR_BINARY || (v->kind == ATRI_IR_RETURN && v->type != ATRI_IR_VOID) ||
             v->kind == ATRI_IR_LOAD || v->kind == ATRI_IR_STORE || v->kind == ATRI_IR_ADDRESS || v->kind == ATRI_IR_COMPARE ||
             v->kind == ATRI_IR_PTR_OFFSET || v->kind == ATRI_IR_PTR_DIFF) live[v->left] = true;
         if (v->kind == ATRI_IR_BINARY || v->kind == ATRI_IR_STORE || v->kind == ATRI_IR_COMPARE ||
@@ -116,7 +123,7 @@ bool atri_optimize(AtriIRProgram *p, bool inline_functions, AtriDiagnostic *d) {
             for (size_t i = 0; i < old->instruction_count; ++i) {
                 AtriIRInst inst = old->instructions[i];
                 if (inst.kind == ATRI_IR_NOP) continue;
-                if (inst.kind == ATRI_IR_UNARY || inst.kind == ATRI_IR_BINARY || inst.kind == ATRI_IR_RETURN ||
+                if (inst.kind == ATRI_IR_C_PROMOTE || inst.kind == ATRI_IR_CAST || inst.kind == ATRI_IR_UNARY || inst.kind == ATRI_IR_BINARY || (inst.kind == ATRI_IR_RETURN && inst.type != ATRI_IR_VOID) ||
                     inst.kind == ATRI_IR_LOAD || inst.kind == ATRI_IR_STORE || inst.kind == ATRI_IR_ADDRESS || inst.kind == ATRI_IR_COMPARE ||
                     inst.kind == ATRI_IR_PTR_OFFSET || inst.kind == ATRI_IR_PTR_DIFF) inst.left = map[inst.left];
                 if (inst.kind == ATRI_IR_BINARY || inst.kind == ATRI_IR_STORE || inst.kind == ATRI_IR_COMPARE ||

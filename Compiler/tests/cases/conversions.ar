@@ -1,0 +1,49 @@
+struct Packet { tag: u8; value: u64; }
+struct SelfSize { bytes: [sizeof(*SelfSize)]u8; }
+
+count: u64 := sizeof(Packet) + alignof(Packet);
+maximum: u64 = 18446744073709551615;
+
+[[extern(C)]] fn c_unsigned(a: u64, b: u64, c: u64, d: u64, e: u64) -> u64;
+fn widen_signed(a: i32) -> i64 { return cast(i64, a); }
+fn signed_to_unsigned(a: i32) -> u64 { return cast(u64, a); }
+fn widen_byte(a: u8) -> u64 { return cast(u64, a); }
+fn narrow_byte(a: u64) -> u8 { return cast(u8, a); }
+fn narrow_signed(a: i64) -> i32 { return cast(i32, a); }
+fn unsigned_to_signed(a: u64) -> i64 { return cast(i64, a); }
+fn unsigned_to_i32(a: u64) -> i32 { return cast(i32, a); }
+fn signed_bits(a: i64) -> u64 { return cast(u64, a); }
+fn add(a: u64, b: u64) -> u64 { return a + b; }
+fn sub(a: u64, b: u64) -> u64 { return a - b; }
+fn mul(a: u64, b: u64) -> u64 { return a * b; }
+fn negate(a: u64) -> u64 { return -a; }
+fn divide(a: u64, b: u64) -> u64 { return a / b; }
+fn remainder(a: u64, b: u64) -> u64 { return a % b; }
+fn less(a: u64, b: u64) -> bool { return a < b; }
+fn less_equal(a: u64, b: u64) -> bool { return a <= b; }
+fn greater(a: u64, b: u64) -> bool { return a > b; }
+fn greater_equal(a: u64, b: u64) -> bool { return a >= b; }
+fn constant_bits() -> u64 {
+    n: u64 := cast(u64, -1);
+    return n;
+}
+fn constant_divide() -> u64 {
+    n: u64 := 18446744073709551615 / 2;
+    return n;
+}
+fn chained(a: u64) -> i64 { return cast(i64, cast(u8, a)); }
+fn use_layout() -> i32 {
+    bytes: [count]u8;
+    wrapped: [cast(u8, 258)]i32 = {5, 6};
+    data: [2]u64 = {18446744073709551615, 9223372036854775808};
+    index: u64 = 1;
+    if (sizeof(Packet) != 16 || alignof(Packet) != 8 || sizeof(SelfSize) != 8) { return 1; }
+    if (sizeof([0]u64) != 0 || alignof([0]u64) != 8) { return 2; }
+    if (sizeof([2]Packet) != 32 || alignof(*char) != 8 || sizeof(bool) != 1) { return 3; }
+    bytes[count - 1] = cast(u8, data[index]);
+    if (bytes[23] != 0 || wrapped[1] != 6 || data[0] != maximum) { return 4; }
+    maximum = maximum + 2;
+    if (maximum != 1) { return 5; }
+    if (c_unsigned(18446744073709551615, 9223372036854775808, 3, 4, 18446744073709551615) != 18446744073709551615) { return 6; }
+    return 0;
+}

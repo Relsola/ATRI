@@ -91,7 +91,7 @@ static void errors_and_growth(void) {
     struct { const char *input, *message; } cases[] = {
         {"fn i32 main(){}", "expected '('"}, {"fn f(i32 a)->i32{}", "expected ':'"},
         {"fn f(a:i32,)->i32{}", "parameter name"}, {"fn f()->i32{const a:i32=0;}", "expected ':'"},
-        {"fn f()->i32{let a:i32;}", "expected ':'"}, {"fn f()->i32{return;}", "integer expression"},
+        {"fn f()->i32{let a:i32;}", "expected ':'"}, {"fn f()->i32{return +;}", "integer expression"},
         {"fn f()->i32{a:i32 :=;return 0;}", "integer expression"},
         {"fn f()->i32{a::1;return 0;}", "module member"},
         {"fn f()->i32{a:i32:1;return 0;}", "expected ':='"},
@@ -174,8 +174,41 @@ static void array_and_run_ast(void) {
     atri_program_destroy(&p);
     reject(source("fn f()->i32{a:[2]i32;return a[0;}"), "expected ']'");
     reject(source("fn f()->i32{return true?1;}"), "expected ':'");
+    input = source("run n:i32=1+2;fn f()->i32{run a:i32=3+4;return a;}");
+    CHECK(atri_parse(input, &p, &d));
+    CHECK(p.globals[0].declaration.kind == ATRI_STMT_VARIABLE);
+    const AtriExpr *global = &p.expressions[p.globals[0].declaration.expression];
+    CHECK(global->kind == ATRI_EXPR_RUN && p.expressions[global->left].kind == ATRI_EXPR_BINARY);
+    CHECK(p.statements[0].kind == ATRI_STMT_VARIABLE);
+    const AtriExpr *local = &p.expressions[p.statements[0].expression];
+    CHECK(local->kind == ATRI_EXPR_RUN && p.expressions[local->left].kind == ATRI_EXPR_BINARY);
+    atri_program_destroy(&p);
+}
+static void conversions_and_layout_ast(void) {
+    AtriSource input = source("fn f()->u8{return cast(u8, sizeof([2]i32)+alignof(i64));}");
+    AtriProgram p;
+    AtriDiagnostic d;
+    CHECK(atri_parse(input, &p, &d));
+    const AtriExpr *cast = &p.expressions[p.statements[0].expression];
+    CHECK(cast->kind == ATRI_EXPR_CAST && text(input, cast->text, "u8"));
+    const AtriExpr *sum = &p.expressions[cast->left];
+    CHECK(sum->kind == ATRI_EXPR_BINARY && p.expressions[sum->left].kind == ATRI_EXPR_SIZEOF && p.expressions[sum->right].kind == ATRI_EXPR_ALIGNOF);
+    CHECK(p.array_type_count == 1);
+    atri_program_destroy(&p);
+}
+static void variadic_opaque_void_ast(void) {
+    AtriSource input = source("struct FILE;[[extern(C)]]fn log(format:*char,...)->void;fn f()->void{return;}");
+    AtriProgram p;
+    AtriDiagnostic d;
+    CHECK(atri_parse(input, &p, &d));
+    CHECK(p.struct_count == 1 && p.structs[0].opaque && p.structs[0].field_count == 0);
+    CHECK(p.functions[0].variadic && p.functions[0].parameter_count == 1);
+    CHECK(p.statements[0].kind == ATRI_STMT_RETURN && p.statements[0].expression == ATRI_NONE);
+    atri_program_destroy(&p);
 }
 int main(void) {
+    variadic_opaque_void_ast();
+    conversions_and_layout_ast();
     array_and_run_ast();
     struct_ast(); ast_and_precedence(); lexical_and_locations(); pointer_ast(); errors_and_growth(); attributes_and_strings();
     puts("frontend tests passed"); return 0;

@@ -1,0 +1,75 @@
+// FILE 由 C 运行库管理，ATRI 只保存和传递指针，不访问内部布局。
+struct FILE;
+
+[[extern(C)]] fn fopen(path: *char, mode: *char) -> *FILE;
+[[extern(C)]] fn fread(buffer: *void, size: u64, count: u64, stream: *FILE) -> u64;
+[[extern(C)]] fn fwrite(buffer: *void, size: u64, count: u64, stream: *FILE) -> u64;
+[[extern(C)]] fn fclose(stream: *FILE) -> i32;
+[[extern(C)]] fn ferror(stream: *FILE) -> i32;
+[[extern(C)]] fn feof(stream: *FILE) -> i32;
+[[extern(C)]] fn printf(format: *char, ...) -> i32;
+
+
+struct Small { a: i32; b: i32; }
+struct Big { a: i64; b: i64; c: i64; }
+struct Handle;
+[[extern(C)]] fn c_args(tag: i32, ...) -> i32;
+[[extern(C)]] fn c_big(tag: i32, ...) -> Big;
+[[extern(C)]] fn c_void(tag: i32, ...) -> void;
+[[extern(C)]] fn c_only(...) -> i32;
+[[extern(C)]] fn c_order(tag: i32, ...) -> i32;
+order: i32;
+fn next() -> i32 { order = order + 1; return order; }
+
+fn check_variadic() -> i32 {
+    small: Small = {.a = -7, .b = 8};
+    big: Big = {.a = -9, .b = 10, .c = 11};
+    n: i32 = 6;
+    byte: u8 = 255;
+    flag: bool = true;
+    if (c_args(17, -123, cast(u64, -1), cast(*void, &n), byte, flag, small, big) != 0) { return 1; }
+    result: Big = c_big(18, byte, flag, -456, cast(u64, -1), big);
+    if (result.a != -9 || result.b != 10 || result.c != 11) { return 2; }
+    c_void(19, cast(*void, &n), byte, flag);
+    if (n != 99 || c_only() != 23) { return 3; }
+    if (c_order(20, next(), next(), next(), next()) != 0 || order != 4) { return 4; }
+    return 0;
+}
+fn opaque_roundtrip(p: *Handle) -> *Handle { return cast(*Handle, cast(*void, p)); }
+fn void_return(p: *i32, flag: bool) -> void {
+    if (flag) { *p = 7; return; }
+    *p = 8;
+}
+fn local_cleanup() -> void { return; }
+fn constant_void() -> i32 {
+    local_cleanup();
+    return 9;
+}
+fn check_file(path: *char, missing: *char) -> i32 {
+    stream: *FILE = fopen(path, "rb");
+    if (stream == null) { return 10; }
+    buffer: [3]u8;
+    bytes: u64;
+    loop {
+        count: u64 = fread(cast(*void, &buffer[0]), 1, 3, stream);
+        if (count == 0) { break; }
+        for (i: u64 = 0; i < count; i = i + 1) {
+            if (buffer[i] != cast(u8, bytes)) { fclose(stream); return 11; }
+            bytes = bytes + 1;
+        }
+    }
+    failed: bool = ferror(stream) != 0 || feof(stream) == 0;
+    closed: i32 = fclose(stream);
+    if (failed || closed != 0 || bytes != 257) { return 12; }
+    absent: *FILE = fopen(missing, "rb");
+    if (absent != null) { fclose(absent); return 13; }
+    return 0;
+}
+fn check_write(path: *char) -> i32 {
+    stream: *FILE = fopen(path, "wb");
+    if (stream == null) { return 14; }
+    data: [4]u8 = {0, 128, 255, 10};
+    count: u64 = fwrite(cast(*void, &data[0]), 1, 4, stream);
+    closed: i32 = fclose(stream);
+    return count == 4 && closed == 0 ? 0 : 15;
+}

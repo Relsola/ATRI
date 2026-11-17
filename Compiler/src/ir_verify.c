@@ -22,7 +22,7 @@ static bool available(const Check *c, size_t use, AtriId id) {
         (c->dominators[c->use_block * c->words + block / 64] & (UINT64_C(1) << (block % 64))) != 0;
 }
 static bool operand(const Check *c, size_t use, AtriId id, AtriIRType type) {
-    return available(c, use, id) && atri_ir_has_value(c->f->instructions[id].kind) &&
+    return type != ATRI_IR_VOID && available(c, use, id) && atri_ir_has_value(c->f->instructions[id].kind) &&
         c->f->instructions[id].type == type;
 }
 static bool location(const Check *c, size_t use, AtriId id, AtriIRType type) {
@@ -44,11 +44,29 @@ static size_t successors(const AtriIRFunction *f, size_t end, AtriId *out) {
     }
     return 0;
 }
+static bool c_object(const AtriIRProgram *p, AtriIRType type, size_t depth) {
+    if (depth > 256) { return false; }
+    if (atri_ir_is_array(type)) {
+        AtriIRArray a = p->arrays[type-ATRI_IR_ARRAY];
+        return a.length != 0 && c_object(p, a.element, depth+1);
+    }
+    if (!atri_ir_is_struct(type)) { return type != ATRI_IR_VOID; }
+    const AtriIRStruct *t = &p->structs[type-ATRI_IR_STRUCT];
+    if (t->opaque || !t->size) { return false; }
+    for (size_t i = 0; i < t->field_count; ++i) {
+        if (!c_object(p, p->fields[t->first_field+i].type, depth+1)) { return false; }
+    }
+    return true;
+}
+static bool variadic_value(const AtriIRProgram *p, AtriIRType type, size_t depth) {
+    return type != ATRI_IR_U8 && type != ATRI_IR_BOOL && !atri_ir_is_array(type) && c_object(p, type, depth);
+}
 static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, AtriDiagnostic *d) {
-    if (!atri_ir_valid_type(p, f->return_type) || (f->parameter_count && !f->parameter_types))
+    if ((f->return_type != ATRI_IR_VOID && !atri_ir_valid_type(p, f->return_type)) || (f->parameter_count && !f->parameter_types))
         return bad(d, f->name, "IR verifier: invalid function signature");
     for (size_t a = 0; a < f->parameter_count; ++a)
         if (!atri_ir_valid_type(p, f->parameter_types[a])) return bad(d, f->name, "IR verifier: invalid parameter type");
+    if (f->variadic && !f->external_c) { return bad(d, f->name, "IR verifier: variadic definitions are not supported"); }
     if (f->constant_count) return bad(d, f->name, "IR verifier: unresolved compile-time constants");
     if (f->external_c) {
         if (f->instruction_count || f->argument_count || f->block_count) {
@@ -73,7 +91,8 @@ static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, Atr
     size_t current = 0; bool closed = false; seen[0] = true;
     for (size_t i = 0; i < f->instruction_count; ++i) {
         const AtriIRInst *v = &f->instructions[i];
-        if (!atri_ir_valid_type(p, v->type)) { bad(d, v->span, "IR verifier: invalid type"); goto done; }
+        if (!atri_ir_valid_type(p, v->type) && !(v->type == ATRI_IR_VOID &&
+            (v->kind == ATRI_IR_CALL || v->kind == ATRI_IR_RETURN || v->kind == ATRI_IR_NOP))) { bad(d, v->span, "IR verifier: invalid type"); goto done; }
         if (v->kind == ATRI_IR_LABEL) {
             if (!closed || v->immediate >= blocks || seen[v->immediate]) {
                 bad(d, v->span, "IR verifier: invalid block label or missing terminator"); goto done;
@@ -146,7 +165,7 @@ static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, Atr
                      f->instructions[v->left].kind == ATRI_IR_INDEX || atri_ir_has_value(f->instructions[v->left].kind)) &&
                     (!atri_ir_is_pointer(input) || operand(&c, i, v->left, input)) &&
                     p->arrays[base-ATRI_IR_ARRAY].element == v->type &&
-                    (operand(&c, i, v->right, ATRI_IR_I32) || operand(&c, i, v->right, ATRI_IR_I64));
+                    (operand(&c, i, v->right, ATRI_IR_I32) || operand(&c, i, v->right, ATRI_IR_I64) || operand(&c, i, v->right, ATRI_IR_U64));
                 break;
             }
             case ATRI_IR_FIELD: {
@@ -168,10 +187,19 @@ static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, Atr
                 valid = v->type == ATRI_IR_PTR_CHAR && v->immediate < p->string_count; break;
             case ATRI_IR_PARAM:
                 valid = c.use_block == 0 && v->immediate < f->parameter_count && v->type == f->parameter_types[v->immediate]; break;
+            case ATRI_IR_C_PROMOTE:
+                valid = v->type == ATRI_IR_I32 && v->left < i &&
+                    (f->instructions[v->left].type == ATRI_IR_BOOL || f->instructions[v->left].type == ATRI_IR_U8) &&
+                    operand(&c, i, v->left, f->instructions[v->left].type); break;
+            case ATRI_IR_CAST:
+                valid = v->left < i && operand(&c, i, v->left, f->instructions[v->left].type) &&
+                    ((atri_ir_is_integer(v->type) && atri_ir_is_integer(f->instructions[v->left].type)) ||
+                     (atri_ir_is_pointer(v->type) && atri_ir_is_pointer(f->instructions[v->left].type))); break;
             case ATRI_IR_UNARY:
                 valid = operand(&c, i, v->left, v->type) &&
                     ((v->op == ATRI_NEG && atri_ir_is_integer(v->type)) || (v->op == ATRI_NOT && v->type == ATRI_IR_BOOL)); break;
-            case ATRI_IR_RETURN: valid = v->type == f->return_type && operand(&c, i, v->left, v->type); break;
+            case ATRI_IR_RETURN:
+                valid = v->type == f->return_type && (v->type == ATRI_IR_VOID ? v->left == ATRI_NONE : operand(&c, i, v->left, v->type)); break;
             case ATRI_IR_BRANCH: valid = operand(&c, i, v->left, ATRI_IR_BOOL); break;
             case ATRI_IR_BINARY:
                 valid = atri_ir_is_integer(v->type) && operand(&c, i, v->left, v->type) &&
@@ -198,11 +226,17 @@ static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, Atr
                     operand(&c, i, v->left, f->instructions[v->left].type) && operand(&c, i, v->right, f->instructions[v->left].type); break;
             case ATRI_IR_CALL:
                 valid = v->callee < p->function_count && v->type == p->functions[v->callee].return_type &&
-                    v->argument_count == p->functions[v->callee].parameter_count &&
+                    v->argument_count >= p->functions[v->callee].parameter_count &&
+                    (p->functions[v->callee].variadic || v->argument_count == p->functions[v->callee].parameter_count) &&
                     (!v->argument_count || p->functions[v->callee].parameter_types != NULL) &&
                     v->first_argument <= f->argument_count && v->argument_count <= f->argument_count-v->first_argument;
-                if (valid) for (size_t a = 0; a < v->argument_count; ++a)
-                    if (!operand(&c, i, f->arguments[v->first_argument+a], p->functions[v->callee].parameter_types[a])) valid = false;
+                if (valid) for (size_t a = 0; a < v->argument_count; ++a) {
+                    AtriId arg = f->arguments[v->first_argument+a];
+                    if (a < p->functions[v->callee].parameter_count) {
+                        if (!operand(&c, i, arg, p->functions[v->callee].parameter_types[a])) { valid = false; }
+                    } else if (arg >= i || !operand(&c, i, arg, f->instructions[arg].type) ||
+                        !variadic_value(p, f->instructions[arg].type, 0)) { valid = false; }
+                }
                 break;
             default: valid = false; break;
         }
@@ -228,6 +262,10 @@ bool atri_ir_verify(const AtriIRProgram *p, AtriDiagnostic *d) {
 
     for (size_t i = 0; i < p->struct_count; ++i) {
         const AtriIRStruct *t = &p->structs[i];
+        if (t->opaque) {
+            if (t->field_count || t->size || t->alignment != 1) { return bad(d, t->name, "IR verifier: opaque type has an object layout"); }
+            continue;
+        }
         if (t->size >= 4096 || !t->alignment || (t->alignment & (t->alignment-1)) || t->alignment > 8 || t->size % t->alignment ||
             t->first_field > p->field_count || t->field_count > p->field_count-t->first_field) {
             return bad(d, t->name, "IR verifier: invalid struct layout");
@@ -235,6 +273,7 @@ bool atri_ir_verify(const AtriIRProgram *p, AtriDiagnostic *d) {
     }
     for (size_t i = 0; i < p->struct_count; ++i) {
         const AtriIRStruct *t = &p->structs[i];
+        if (t->opaque) { continue; }
         size_t end = 0, max_alignment = 1;
         for (size_t j = 0; j < t->field_count; ++j) {
             const AtriIRField *f = &p->fields[t->first_field+j];

@@ -50,7 +50,7 @@ static void arithmetic(void) {
 static void names_and_types(void) {
     EXPECT_COMPILE_ERROR("fn f()->i32{x: i32 :=1;x=2;return x;}", "cannot assign");
     EXPECT_COMPILE_ERROR("fn f(x:i32)->i32{x=2;return x;}", "cannot assign");
-    EXPECT_COMPILE_ERROR("fn f()->i32{x:u64=1;return x;}", "unknown or private type");
+    EXPECT_COMPILE_ERROR("fn f()->i32{x:i16=1;return x;}", "unknown or private type");
     EXPECT_COMPILE_ERROR("fn f()->i32{g: i32 :=1;return g();}", "not callable");
     EXPECT_COMPILE_ERROR("fn f()->i32{x:i32;}", "must return");
     EXPECT_COMPILE_ERROR("fn f()->i32{return a;a: i32 :=1;}", "unknown local");
@@ -63,9 +63,9 @@ static void names_and_types(void) {
     EXPECT_COMPILE_ERROR("fn f()->i32{a:i32=a;return a;}", "unknown local");
     EXPECT_COMPILE_ERROR("fn f()->i32{a=1;return 0;}", "unknown name");
     EXPECT_COMPILE_ERROR("fn f()->i32{g: i32 :=1;return g();}", "not callable");
-    EXPECT_COMPILE_ERROR("fn f()->u64{return 1;}", "unknown or private type");
+    EXPECT_COMPILE_ERROR("fn f()->i16{return 1;}", "unknown or private type");
     EXPECT_COMPILE_ERROR("fn f(a:f32)->i32{return 1;}", "unknown or private type");
-    EXPECT_COMPILE_ERROR("fn f()->i32{a: u64 :=1;return 0;}", "unknown or private type");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a: i16 :=1;return 0;}", "unknown or private type");
     EXPECT_COMPILE_ERROR("fn f()->i32{}", "must return");
     EXPECT_COMPILE_ERROR("fn f()->i32{return 0;return missing;}", "unknown local");
 }
@@ -281,7 +281,18 @@ static void arrays_and_run(void) {
     EXPECT_COMPILE_ERROR("fn f()->i32{return run (1/0);}", "by zero");
     EXPECT_COMPILE_ERROR("fn f()->i32{return 1?2:3;}", "type mismatch");
     EXPECT_COMPILE_ERROR("fn f()->i32{return true?1:false;}", "type mismatch");
-    EXPECT_PARSE_ERROR("fn f()->i32{run a:i32=1;return a;}", "requires ':='");
+    test = test_compile("mutable run declaration",
+        "fn max(a:i32,b:i32)->i32{return a>b?a:b;}"
+        "fn main()->i32{run a:i32=max(1,2)+1;a=a+4;return a;}", TEST_O0);
+    EXPECT_NO_CALLS(test.before, "main");
+    EXPECT_RETURN_I32(test.after, "main", 7);
+    test_destroy(&test);
+    EXPECT_PARSE_ERROR("fn f()->i32{run a:i32;return a;}", "explicit compile-time initializer");
+    EXPECT_COMPILE_ERROR("fn f(x:i32)->i32{run a:i32=x+1;return a;}", "runtime variable or parameter");
+    EXPECT_COMPILE_ERROR("fn f()->i32{x:i32=1;run a:i32=x+1;return a;}", "runtime variable or parameter");
+    EXPECT_COMPILE_ERROR("[[extern(C)]]fn ext()->i32;fn f()->i32{run a:i32=ext();return a;}", "cannot execute at compile time");
+    EXPECT_COMPILE_ERROR("fn f()->i32{run a:i32=1/0;return a;}", "by zero");
+    EXPECT_COMPILE_ERROR("fn f()->i32{run a:i32:=1;a=2;return a;}", "cannot assign");
     EXPECT_COMPILE_ERROR("N:i32 :=2;fn f(N:i32)->i32{a:[N]i32;return 0;}", "array length");
     EXPECT_COMPILE_ERROR("N:i32 :=2;fn f()->i32{N:i32=3;a:[N]i32;return 0;}", "array length");
     EXPECT_COMPILE_ERROR("N:i32 :=2;fn f()->i32{for(N:i32=3;false;){a:[N]i32;}return 0;}", "array length");
@@ -296,7 +307,94 @@ static void arrays_and_run(void) {
     test_destroy(&test);
 
 }
+static void conversions_and_layout(void) {
+    expect_fold_i32("cast(i32, cast(u8, 300))", 44);
+    expect_fold_i32("cast(i32, sizeof([3]i32))", 12);
+    expect_constant_i32("fn main()->i32{n:i32 :=cast(i32, cast(u64,-1));return n;}", -1);
+    expect_constant_i32("fn main()->i32{n:i32 :=cast(i32, sizeof([0]i64));return n;}", 0);
+    Compilation test = test_compile("u64 constant", "fn f()->u64{n:u64 :=18446744073709551615+2;return n;}", TEST_O0);
+    AtriIRFunction *f = test_function(&test.before, "f");
+    CHECK(f->instructions[f->instructions[f->instruction_count-1].left].immediate == 1);
+    test_destroy(&test);
+    test = test_compile("run conversion", "fn f()->u64{return run cast(u64,-1);}", TEST_O0);
+    f = test_function(&test.before, "f");
+    CHECK(f->instructions[f->instructions[f->instruction_count-1].left].immediate == UINT64_MAX);
+    test_destroy(&test);
+    test = test_compile("constant unsigned comparison", "fn f()->bool{n:bool := cast(u64,-1)>0;return n;}", TEST_O0);
+    EXPECT_RETURN_BOOL(test.before, "f", true);
+    test_destroy(&test);
+    test = test_compile("grouped type spelling", "fn f()->i32{u8:i32=2;return (u8)+3;}", TEST_O1);
+    EXPECT_RETURN_I32(test.after, "f", 5);
+    test_destroy(&test);
+    EXPECT_COMPILE_ERROR("fn f()->u64{return 18446744073709551616;}", "u64 range");
+    EXPECT_COMPILE_ERROR("fn f()->i64{x:u64=1;return x;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->u64{x:i64=1;return x;}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return sizeof(i32);}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->i32{return cast(i32,true);}", "integer operands");
+    EXPECT_COMPILE_ERROR("fn f()->bool{return cast(bool,1);}", "integer target");
+    EXPECT_COMPILE_ERROR("fn f(p:*i32)->u64{return cast(u64,p);}", "integer operands");
+    EXPECT_COMPILE_ERROR("fn f()->*i32{return cast(*i32,1);}", "pointer operands");
+    EXPECT_COMPILE_ERROR("fn f()->u64{return sizeof(void);}", "no object layout");
+    EXPECT_COMPILE_ERROR("fn f()->u64{return alignof(Missing);}", "unknown or private type");
+    EXPECT_COMPILE_ERROR("struct S{bytes:[sizeof(S)]u8;}", "cyclic");
+    EXPECT_COMPILE_ERROR("N:u64 :=sizeof([N]u8);fn f()->i32{a:[N]u8;return 0;}", "resource limit");
+    EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32;i:u64 :=18446744073709551615;return a[i];}", "out of bounds");
+    EXPECT_COMPILE_ERROR("fn f()->i32{n:u64 :=1/0;return 0;}", "by zero");
+    EXPECT_COMPILE_ERROR("fn f(p:*i32,n:u64)->*i32{return p+n;}", "pointer offset requires");
+    EXPECT_PARSE_ERROR("fn f()->u8{return cast<u8>1;}", "expected '('");
+    EXPECT_PARSE_ERROR("fn f()->u8{return cast(u8 1);}", "expected ','");
+    EXPECT_PARSE_ERROR("fn f()->u64{return sizeof(1);}", "object type");
+}
+static void c_variadic_and_void(void) {
+    Compilation test = test_compile("C promotions", "[[extern(C)]]fn c(tag:i32,...)->i32;"
+        "fn f(b:u8,flag:bool)->i32{return c(1,b,flag);}", TEST_O0);
+    AtriIRFunction *f = test_function(&test.before, "f");
+    AtriId call = test_instruction(&test.before, "f", ATRI_IR_CALL, 0);
+    CHECK(test_function(&test.before, "c")->variadic);
+    CHECK(f->instructions[call].argument_count == 3);
+    EXPECT_OPERATIONS(test.before, "f", ATRI_IR_C_PROMOTE, 2);
+    EXPECT_VALID_IR(test.before);
+    test_destroy(&test);
+    expect_constant_i32("fn cleanup()->void{return;}fn eval()->i32{cleanup();return 9;}fn main()->i32{n:i32 :=eval();return n;}", 9);
+    test = test_compile("opaque pointer", "struct Handle;fn f(p:*Handle)->*void{return cast(*void,p);}", TEST_O1);
+    CHECK(test.before.program.structs[0].opaque);
+    EXPECT_VALID_IR(test.after);
+    test_destroy(&test);
+    test = test_compile("void null", "p:*void=cast(*void,null);fn f()->u64{return sizeof(*void);}", TEST_O0);
+    CHECK(test.before.program.globals[0].type == ATRI_IR_PTR_VOID);
+    test_destroy(&test);
+    EXPECT_COMPILE_ERROR("fn f()->i32{return;}", "must return a value");
+    EXPECT_COMPILE_ERROR("fn f()->void{return 1;}", "without a value");
+    EXPECT_COMPILE_ERROR("fn f()->void{x:void;}", "no object layout");
+    EXPECT_COMPILE_ERROR("fn f(a:void)->i32{return 0;}", "no object layout");
+    EXPECT_COMPILE_ERROR("fn f()->void{}fn g()->i32{return f();}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->void{}fn g()->i32{return run f();}", "type mismatch");
+    EXPECT_COMPILE_ERROR("struct O;fn f()->u64{return sizeof(O);}", "opaque struct");
+    EXPECT_COMPILE_ERROR("struct O;fn f()->i32{x:O;return 0;}", "opaque struct");
+    EXPECT_COMPILE_ERROR("struct O;struct S{x:O;}", "opaque struct");
+    EXPECT_COMPILE_ERROR("struct O;fn f(p:*O)->O{return *p;}", "opaque struct");
+    EXPECT_COMPILE_ERROR("struct O;fn f(p:*O)->*O{return p+1;}", "incomplete");
+    EXPECT_COMPILE_ERROR("fn f(p:*void)->i32{return *p;}", "complete object");
+    EXPECT_COMPILE_ERROR("fn f(p:*[1]void)->i32{return 0;}", "complete object");
+    EXPECT_COMPILE_ERROR("struct F;fn f(p:*[1]F)->i32{return 0;}", "complete object");
+    EXPECT_COMPILE_ERROR("fn f(p:*void)->*void{return p+1;}", "incomplete");
+    EXPECT_COMPILE_ERROR("fn f(x:i32)->*void{return cast(*void,x);}", "pointer operands");
+    EXPECT_COMPILE_ERROR("fn f()->*void{a:i32;return cast(*void,&a);}", "address of a local");
+    EXPECT_COMPILE_ERROR("fn f()->i32{p:*void=null;return *cast(*i32,p);}", "null pointer");
+    EXPECT_COMPILE_ERROR("fn f(p:*[1]void)->i32{return 0;}", "complete object");
+    EXPECT_COMPILE_ERROR("struct O;fn f(p:*[1]O)->i32{return 0;}", "complete object");
+    EXPECT_COMPILE_ERROR("[[extern(C)]]fn c(x:i32,...)->i32;fn f()->i32{return c();}", "argument count");
+    EXPECT_COMPILE_ERROR("[[extern(C)]]fn c(x:i32,...)->i32;fn f(b:u8)->i32{return c(b);}", "type mismatch");
+    EXPECT_COMPILE_ERROR("[[extern(C)]]fn c(x:i32,...)->i32;fn f()->i32{a:[2]i32;return c(0,a);}", "explicit element pointer");
+    EXPECT_COMPILE_ERROR("struct E{}[[extern(C)]]fn c(x:i32,...)->i32;fn f()->i32{e:E;return c(0,e);}", "supported C ABI value");
+    EXPECT_COMPILE_ERROR("[[extern(C)]]fn c(x:i32,...)->i32;fn f()->i32{return run c(0,1);}", "cannot execute at compile time");
+    EXPECT_COMPILE_ERROR("[[extern(C)]]fn c(x:i32,...)->i32;fn f()->i32{return c(0,null);}", "pointer type context");
+    EXPECT_PARSE_ERROR("fn f(x:i32,...)->i32{return 0;}", "require an extern(C)");
+    EXPECT_PARSE_ERROR("[[extern(C)]]fn f(x:i32,...,y:i32)->i32;", "last parameter");
+}
 int main(void) {
+    c_variadic_and_void();
+    conversions_and_layout();
     arrays_and_run();
     arithmetic();
     names_and_types();

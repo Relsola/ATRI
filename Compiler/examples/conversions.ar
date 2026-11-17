@@ -1,0 +1,22 @@
+struct Packet {
+    tag: u8;
+    value: u64;
+}
+
+struct Empty {}
+
+fn main() -> i32 {
+    rgba: u64 = 300;
+    byte: u8 = cast(u8, rgba);
+    bytes: u64 := sizeof(Packet);
+    alignment: u64 := alignof(Packet);
+    data: [sizeof(Packet)]u8;
+    data[0] = byte;
+    if (data[0] != 44 || bytes != 16 || alignment != 8) {
+        return 1;
+    }
+    if (sizeof(Empty) != 0 || alignof(Empty) != 1 || sizeof([0]u64) != 0 || alignof([0]u64) != 8) {
+        return 2;
+    }
+    return 0;
+}

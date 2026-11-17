@@ -38,7 +38,7 @@ typedef enum {
 typedef enum {
     ATRI_EXPR_INTEGER, ATRI_EXPR_NAME, ATRI_EXPR_UNARY, ATRI_EXPR_BINARY, ATRI_EXPR_CALL,
     ATRI_EXPR_ADDRESS, ATRI_EXPR_DEREFERENCE, ATRI_EXPR_NULL, ATRI_EXPR_BOOL, ATRI_EXPR_STRING, ATRI_EXPR_FIELD, ATRI_EXPR_INITIALIZER,
-    ATRI_EXPR_INDEX, ATRI_EXPR_CONDITIONAL, ATRI_EXPR_RUN
+    ATRI_EXPR_INDEX, ATRI_EXPR_CONDITIONAL, ATRI_EXPR_RUN, ATRI_EXPR_CAST, ATRI_EXPR_SIZEOF, ATRI_EXPR_ALIGNOF
 } AtriExprKind;
 typedef struct {
     AtriExprKind kind;
@@ -77,11 +77,12 @@ typedef struct {
     size_t first_statement, statement_count;
     AtriId block;
     bool external_c;
+    bool variadic;
     bool exported;
 } AtriFunction;
 
 typedef struct { AtriSpan name, type; AtriId expression; } AtriField;
-typedef struct { AtriSpan name, span; size_t first_field, field_count; bool exported; } AtriStruct;
+typedef struct { AtriSpan name, span; size_t first_field, field_count; bool exported, opaque; } AtriStruct;
 typedef struct { AtriSpan name; AtriId expression; } AtriInitializer;
 typedef struct { AtriSpan name, path; AtriId target; } AtriImport;
 typedef struct { AtriStatement declaration; bool exported; } AtriGlobal;

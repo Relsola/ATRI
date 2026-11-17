@@ -1,0 +1,10 @@
+stdio :: import "c_stdio";
+
+fn main() -> i32 {
+    byte: u8 = 255;
+    flag: bool = true;
+    // u8/bool 在 ... 中提升为 C int；i64/u64 保持 64 位。
+    result: i32 = stdio::printf("%d %d %lld %llu %s\n", byte, flag,
+        cast(i64, -7), cast(u64, -1), "ok");
+    return result < 0 ? 1 : 0;
+}

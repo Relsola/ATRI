@@ -8,6 +8,9 @@ static const char *c_type(AtriIRType type) {
         return name;
     }
     switch (type) {
+        case ATRI_IR_VOID: return "void";
+        case ATRI_IR_PTR_VOID: return "void *";
+        case ATRI_IR_U64: return "uint64_t";
         case ATRI_IR_U8: return "uint8_t";
         case ATRI_IR_PTR_U8: return "uint8_t *";
         case ATRI_IR_I32: return "int32_t";
@@ -22,6 +25,7 @@ static const char *c_type(AtriIRType type) {
 static void emit_struct(FILE *header, const TestIR *ir, size_t index, bool *emitted) {
     if (emitted[index]) { return; }
     const AtriIRStruct *t = &ir->program.structs[index];
+    if (t->opaque) { emitted[index] = true; return; }
     if (!t->size) { fputs("zero-size structs have no C test binding\n", stderr); exit(EXIT_FAILURE); }
     for (size_t i = 0; i < t->field_count; ++i) {
         AtriIRType type = ir->program.fields[t->first_field+i].type;
