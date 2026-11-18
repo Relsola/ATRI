@@ -89,8 +89,10 @@ static bool parse_primary(Parser *p, AtriId *result) {
     if (token.kind == ATRI_TOKEN_RUN) {
         advance(p);
         if (p->current.kind == ATRI_TOKEN_LEFT_BRACE || p->current.kind == ATRI_TOKEN_ARROW) { return fail(p, "#run code blocks are reserved but not implemented yet"); }
+        if (p->current.kind != ATRI_TOKEN_IDENTIFIER) { return fail(p, "#run requires a direct function call"); }
         AtriId operand;
-        if (!parse_expression(p, 30, &operand)) { return false; }
+        if (!parse_primary(p, &operand)) { return false; }
+        if (p->program.expressions[operand].kind != ATRI_EXPR_CALL) { return fail(p, "#run requires a direct function call"); }
         return append_expr(p, (AtriExpr){.kind = ATRI_EXPR_RUN, .left = operand,
             .span = {token.span.start, p->program.expressions[operand].span.end}}, result);
     }

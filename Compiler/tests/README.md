@@ -115,6 +115,10 @@ compiler/front-end 测试覆盖索引静态越界、零长度访问、初始化�
 
 ## 编译器指令、枚举与 switch 回归
 
+`#run` 解析回归接受直接函数调用并拒绝表达式形式。`switch` 回归继续验证普通 `case` 常量表达式和 `case #run f():`，以及求值后的重复标签诊断。
+
+[多级指针原生用例](cases/multi_level_pointers.ar)在 -O0/-O1 下与 C 双向传参和返回，核对指针槽的别名改写、三级解引用、偏移与差值、指针转换、多级指针的全局和字段布局、opaque 指针槽与数组目标。Verifier 专项检查解引用层数不匹配的 IR。
+
 frontend 专项核对 #run/#extern 的前缀、# 与名称间空白、未知/重复指令、旧语法拒绝，以及两种 #run 块形式的未实现诊断。compiler 专项验证顶层和函数内的独立调用、丢弃结果和 `void` 调用，以及独立调用仍报告编译期求值错误。原生回归使用 [cases/run_constants.ar](cases/run_constants.ar)，并检查只产生 `main`。代码块形式的示例见[语言规范](../NEXT/language_spec_v0_1.md#121-能力边界)。
 
 [enum_switch.ar](../examples/enum_switch.ar) 与 [enum_switch_harness.c](enum_switch_harness.c) 对 [cases/enum_switch.ar](cases/enum_switch.ar) 在 -O0/-O1 下验证成员自动/显式值、各整数符号/高位表示、位组合及零值、直接计算/数组长度/索引、整数别名的 C 参数/返回/字段/可变参数提升和静态全局。分支验证一次求值、空标签组、默认不贯穿、显式 #through、嵌套词法块、独立 case 作用域、嵌套 switch 与循环的 break/continue；[enum_modules.ar](cases/enum_modules.ar) 验证直接及命名导入、三段限定成员名和共享存储。

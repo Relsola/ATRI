@@ -391,26 +391,23 @@ static bool conditional(Lower *l, const AtriExpr *e, AtriIRType expected, AtriId
         jump(l, end, e->span) && label(l, end, e->span) &&
         emit(l, (AtriIRInst){.kind = ATRI_IR_LOAD, .type = type, .left = local, .span = e->span}, out);
 }
-static bool run_evaluate(Lower *l, const AtriExpr *e, AtriIRType expected, bool discard, AtriId *out) {
-    if (l->constant_context) { return expression(l, e->left, expected, out); }
+static bool compile_time_value(Lower *l, AtriId operand, AtriSpan span, AtriIRType expected, bool discard, AtriId *out) {
+    if (l->constant_context) { return expression(l, operand, expected, out); }
     size_t first = l->function->instruction_count;
     l->constant_context = true;
     AtriId value, result;
-    bool ok = expression(l, e->left, expected, &value);
+    bool ok = expression(l, operand, expected, &value);
     l->constant_context = false;
     if (!ok) { return false; }
     AtriIRType type = l->function->instructions[value].type;
     /* 无结果调用仍需执行求值义务，内部占位只用于删除求值区间。 */
     if (type == ATRI_IR_VOID && discard) { type = ATRI_IR_I32; }
-    if (!atri_ir_is_integer(type) && type != ATRI_IR_BOOL) { return error(l, e->span, "#run currently requires an integer/bool result or a discarded void call"); }
-    if (!emit(l, (AtriIRInst){.kind = ATRI_IR_CONST, .type = type, .span = e->span}, &result)) { return false; }
-    AtriIRConstant obligation = {.span = e->span, .expression = value, .result = result, .first_instruction = first};
+    if (!atri_ir_is_integer(type) && type != ATRI_IR_BOOL) { return error(l, span, "compile-time evaluation requires an integer/bool result or a discarded void call"); }
+    if (!emit(l, (AtriIRInst){.kind = ATRI_IR_CONST, .type = type, .span = span}, &result)) { return false; }
+    AtriIRConstant obligation = {.span = span, .expression = value, .result = result, .first_instruction = first};
     if (!atri_append((void **)&l->function->constants, &l->function->constant_count,
-        &l->function->constant_capacity, sizeof(obligation), &obligation)) { return error(l, e->span, "out of memory"); }
+        &l->function->constant_capacity, sizeof(obligation), &obligation)) { return error(l, span, "out of memory"); }
     *out = result; return true;
-}
-static bool run_expression(Lower *l, const AtriExpr *e, AtriIRType expected, AtriId *out) {
-    return run_evaluate(l, e, expected, false, out);
 }
 static AtriIRType integer_type_name(Lower *l, AtriSpan span) {
     AtriIRType type = atri_ir_builtin_type(l->source.text+span.start, span.end-span.start);
@@ -494,7 +491,6 @@ static bool address(Lower *l, AtriId id, AtriId *out) {
         if (b != ATRI_NONE && !atri_ir_is_integer(l->bindings[b].type) && l->bindings[b].type != ATRI_IR_BOOL && !atri_ir_is_aggregate(l->bindings[b].type) && !atri_ir_is_pointer(l->bindings[b].type)) {
             return error(l, e->span, "address-of requires a supported scalar or aggregate variable");
         }
-        if (b != ATRI_NONE && atri_ir_is_pointer(l->bindings[b].type)) { return error(l, e->span, "taking the address of a pointer requires unsupported multi-level pointers"); }
         if (b != ATRI_NONE && !l->bindings[b].mutable) {
             return error(l, e->span, "cannot take the address of a compile-time constant or read-only parameter");
         }
@@ -502,7 +498,7 @@ static bool address(Lower *l, AtriId id, AtriId *out) {
     AtriIRType target; AtriId storage;
     if (!location(l, id, true, &target, &storage)) { return false; }
     AtriIRType pointer = atri_ir_pointer_type(target);
-    if (pointer == ATRI_IR_INVALID) { return error(l, e->span, "taking the address requires a supported scalar or aggregate; multi-level pointers are unsupported"); }
+    if (pointer == ATRI_IR_INVALID) { return error(l, e->span, "cannot form a pointer to this object type within the pointer nesting limit"); }
     return emit(l, (AtriIRInst){.kind = ATRI_IR_ADDRESS, .type = pointer, .left = storage, .span = e->span}, out);
 }
 static bool binary_values(Lower *l, AtriOp op, AtriId left, AtriId right, AtriSpan span, AtriId *out) {
@@ -577,7 +573,7 @@ static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out) {
             inst.immediate = e->kind == ATRI_EXPR_SIZEOF ? atri_ir_type_size(l->ir, object) : atri_ir_type_align(l->ir, object);
             ok = emit(l, inst, out); break;
         }
-        case ATRI_EXPR_RUN: ok = run_expression(l, e, expected, out); break;
+        case ATRI_EXPR_RUN: ok = compile_time_value(l, e->left, e->span, expected, false, out); break;
         case ATRI_EXPR_CONDITIONAL: ok = conditional(l, e, expected, out); break;
         case ATRI_EXPR_STRING: ok = string_literal(l, e, out); break;
         case ATRI_EXPR_BOOL:
@@ -748,8 +744,7 @@ static bool switch_statement(Lower *l, const AtriStatement *s) {
         const AtriCase *item = &l->ast->cases[s->first_case+i];
         if (item->expression == ATRI_NONE) { continue; }
         AtriId constant, comparison, next = new_block(l);
-        AtriExpr run = {.kind = ATRI_EXPR_RUN, .left = item->expression, .span = item->span};
-        if (!run_expression(l, &run, type, &constant)) { goto done; }
+        if (!compile_time_value(l, item->expression, item->span, type, false, &constant)) { goto done; }
         CaseValue value = {.function = (size_t)(l->function-l->ir->functions), .result = constant,
             .group = s->span.start, .span = item->span};
         if (!atri_append((void **)&l->case_values, &l->case_count, &l->case_capacity, sizeof(value), &value)) { error(l, item->span, "out of memory"); goto done; }
@@ -789,7 +784,7 @@ static bool simple(Lower *l, const AtriStatement *s) {
     if (s->kind == ATRI_STMT_EXPR) {
         AtriId ignored;
         const AtriExpr *e = &l->ast->expressions[s->expression];
-        return e->kind == ATRI_EXPR_RUN ? run_evaluate(l, e, ATRI_IR_INVALID, true, &ignored) :
+        return e->kind == ATRI_EXPR_RUN ? compile_time_value(l, e->left, e->span, ATRI_IR_INVALID, true, &ignored) :
             expression(l, s->expression, ATRI_IR_INVALID, &ignored);
     }
     if (s->kind == ATRI_STMT_RETURN) {
@@ -867,7 +862,7 @@ static bool simple(Lower *l, const AtriStatement *s) {
     }
     if (declaration) {
         AtriId local = ATRI_NONE;
-        if (s->kind == ATRI_STMT_VARIABLE && (l->memory || atri_ir_is_aggregate(expected) || ((atri_ir_is_integer(expected) || expected == ATRI_IR_BOOL) && address_taken(l, s->name)))) {
+        if (s->kind == ATRI_STMT_VARIABLE && (l->memory || atri_ir_is_aggregate(expected) || address_taken(l, s->name))) {
             if (!emit(l, (AtriIRInst){.kind = ATRI_IR_LOCAL, .type = expected, .span = s->span}, &local) ||
                 !store(l, local, value, s->span)) return false;
         }

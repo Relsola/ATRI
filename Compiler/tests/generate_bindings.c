@@ -1,37 +1,40 @@
 #include "test_support.h"
 
 /* 仅供测试：使用与后端相同的函数顺序映射符号，具名用例无需手写编号；不定义正式 FFI 命名规则。 */
-static const char *c_type(const AtriIRProgram *p, AtriIRType type) {
-    static char name[80];
-    if (atri_ir_is_struct(type) || (type >= ATRI_IR_PTR_STRUCT && atri_ir_is_struct(atri_ir_pointee(type)))) {
-        size_t index = type >= ATRI_IR_PTR_STRUCT ? type-ATRI_IR_PTR_STRUCT : type-ATRI_IR_STRUCT;
-        snprintf(name, sizeof(name), "%s atri_struct_%zu%s", p->structs[index].is_union ? "union" : "struct",
-            index, type >= ATRI_IR_PTR_STRUCT ? " *" : "");
-        return name;
-    }
+static const char *c_builtin_type(AtriIRType type) {
     switch (type) {
         case ATRI_IR_VOID: return "void";
-        case ATRI_IR_PTR_VOID: return "void *";
         case ATRI_IR_I8: return "int8_t";
         case ATRI_IR_I16: return "int16_t";
         case ATRI_IR_U16: return "uint16_t";
         case ATRI_IR_U32: return "uint32_t";
-        case ATRI_IR_PTR_I8: return "int8_t *";
-        case ATRI_IR_PTR_I16: return "int16_t *";
-        case ATRI_IR_PTR_U16: return "uint16_t *";
-        case ATRI_IR_PTR_U32: return "uint32_t *";
-        case ATRI_IR_PTR_I64: return "int64_t *";
-        case ATRI_IR_PTR_U64: return "uint64_t *";
-        case ATRI_IR_PTR_BOOL: return "bool *";
         case ATRI_IR_U64: return "uint64_t";
         case ATRI_IR_U8: return "uint8_t";
-        case ATRI_IR_PTR_U8: return "uint8_t *";
         case ATRI_IR_I32: return "int32_t";
         case ATRI_IR_I64: return "int64_t";
         case ATRI_IR_BOOL: return "bool";
-        case ATRI_IR_PTR_I32: return "int32_t *";
         default: fputs("unsupported test binding type\n", stderr); exit(EXIT_FAILURE);
     }
+}
+
+static const char *c_type(const AtriIRProgram *p, AtriIRType type) {
+    static char name[80 + ATRI_IR_MAX_POINTER_DEPTH];
+    size_t depth = 0;
+    while (atri_ir_is_pointer(type)) { ++depth; type = atri_ir_pointee(type); }
+    size_t length;
+    if (atri_ir_is_struct(type)) {
+        size_t index = type-ATRI_IR_STRUCT;
+        length = (size_t)snprintf(name, sizeof(name), "%s atri_struct_%zu",
+            p->structs[index].is_union ? "union" : "struct", index);
+    } else {
+        const char *base = c_builtin_type(type);
+        length = strlen(base);
+        memcpy(name, base, length);
+    }
+    if (depth) { name[length++] = ' '; }
+    memset(name+length, '*', depth);
+    name[length+depth] = '\0';
+    return name;
 }
 
 static void emit_struct(FILE *header, const TestIR *ir, size_t index, bool *emitted) {

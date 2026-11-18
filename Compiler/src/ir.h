@@ -9,7 +9,9 @@ typedef enum { ATRI_IR_I32, ATRI_IR_I64, ATRI_IR_PTR_I32, ATRI_IR_BOOL, ATRI_IR_
     ATRI_IR_I8, ATRI_IR_I16, ATRI_IR_U16, ATRI_IR_U32,
     ATRI_IR_PTR_I8, ATRI_IR_PTR_I16, ATRI_IR_PTR_U16, ATRI_IR_PTR_U32,
     ATRI_IR_PTR_I64, ATRI_IR_PTR_U64, ATRI_IR_PTR_BOOL,
-    ATRI_IR_STRUCT = 256, ATRI_IR_ARRAY = 524288, ATRI_IR_PTR_STRUCT = 1048576 } AtriIRType;
+    ATRI_IR_STRUCT = 256, ATRI_IR_ARRAY = 524288, ATRI_IR_PTR_STRUCT = 1048576,
+    ATRI_IR_POINTER_LEVEL = 2097152 } AtriIRType;
+enum { ATRI_IR_MAX_POINTER_DEPTH = 256 };
 typedef enum {
     ATRI_IR_NOP, ATRI_IR_PARAM, ATRI_IR_CONST, ATRI_IR_UNARY,
     ATRI_IR_BINARY, ATRI_IR_CALL, ATRI_IR_RETURN,
@@ -133,7 +135,8 @@ AtriIRType atri_ir_builtin_type(const char *name, size_t length);
 bool atri_ir_is_pointer(AtriIRType type);
 bool atri_ir_has_value(AtriIRKind kind);
 bool atri_compare(AtriIRType type, AtriOp op, uint64_t a, uint64_t b);
-const char *atri_ir_type_name(AtriIRType type);
+enum { ATRI_IR_TYPE_NAME_SIZE = ATRI_IR_MAX_POINTER_DEPTH + 8 };
+const char *atri_ir_type_name(AtriIRType type, char name[ATRI_IR_TYPE_NAME_SIZE]);
 uint64_t atri_integer_convert(AtriIRType source, AtriIRType target, uint64_t bits);
 bool atri_integer_compute(AtriIRType type, AtriOp op, uint64_t a, uint64_t b, uint64_t *result);
 /* 除零及有符号最小值 / 或 % -1 返回 false；其余结果按目标位模式保存。 */

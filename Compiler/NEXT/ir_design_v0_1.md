@@ -6,7 +6,9 @@
 
 AtriIRProgram → AtriIRFunction → AtriIRInst[]，函数另有调用实参索引数组。函数索引引用调用目标，指令索引引用函数内定义；名称及原始源码区间用于 Dump/诊断和外部符号输出，输入源码必须保持存活。Program 另拥有 strings 数组及各项解码字节，length 不含额外终止零字节，destroy 时释放。
 
-值类型为八种定宽整数、bool、上述类型的一层数据指针、*void、固定数组、名义结构体及其支持的指针，函数签名记录所有参数及返回值。普通函数有显式 block_count，入口块 0 隐含存在，其余块用 label immediate 标识；物理排列顺序不必等于块号顺序。jump、branch、return、unreachable 为终结指令，每块必须恰有一个终结，不能隐式落入后继块。branch 的条件必须为 bool，分别记录真/假目标。
+值类型为八种定宽整数、bool、多级数据指针、固定数组和名义聚合，函数签名记录所有参数及返回值。普通函数有显式 block_count，入口块 0 隐含存在，其余块用 label immediate 标识。jump、branch、return、unreachable 为终结指令，每块必须恰有一个终结。branch 的条件为 bool，分别记录真/假目标。
+
+指针类型 ID 保留一层目标的编码，额外层数编码在高位。编译器用同一整数类型 ID 检查目标和层数，无需分配额外的类型记录。`LOAD`、`STORE` 和 `ADDRESS` 仍按直接目标检查，`PTR_OFFSET` 和 `PTR_DIFF` 用直接目标大小。各级指针在 Windows x64 上均占 8 字节，逐层访问生成所需的实际访存，ABI 和运行期表示与原有数据指针一致。
 
 external_c 函数只记录签名与 variadic 标志，parameter_count 仅为固定前缀数量；非外部定义暂不允许 variadic。external_c 函数，instruction_count、argument_count 和 block_count 必须为 0，不生成函数体、栈帧、CFG 或展开信息。call 记录全部实际参数，固定前缀精确匹配、尾部检查已完成 C 默认提升的类型。call 继续通过函数索引统一引用普通定义和外部声明。extern(C) 不进入内联或常量解释执行。
 

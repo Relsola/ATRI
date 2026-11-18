@@ -7,7 +7,18 @@
 bool atri_ir_is_struct(AtriIRType type) { return type >= ATRI_IR_STRUCT && type < ATRI_IR_ARRAY; }
 bool atri_ir_is_array(AtriIRType type) { return type >= ATRI_IR_ARRAY && type < ATRI_IR_PTR_STRUCT; }
 bool atri_ir_is_aggregate(AtriIRType type) { return atri_ir_is_struct(type) || atri_ir_is_array(type); }
+bool atri_ir_is_pointer(AtriIRType type) {
+    unsigned id = (unsigned)type;
+    if (id / ATRI_IR_POINTER_LEVEL >= ATRI_IR_MAX_POINTER_DEPTH) { return false; }
+    /* 低位保留一层指针 ID，高位记录额外层数。 */
+    unsigned base = id % ATRI_IR_POINTER_LEVEL;
+    return base == ATRI_IR_PTR_I32 || base == ATRI_IR_PTR_U8 || base == ATRI_IR_PTR_VOID ||
+        (base >= ATRI_IR_PTR_I8 && base <= ATRI_IR_PTR_BOOL) ||
+        (base >= ATRI_IR_PTR_STRUCT && base < ATRI_IR_POINTER_LEVEL-ATRI_IR_STRUCT);
+}
 AtriIRType atri_ir_pointee(AtriIRType type) {
+    if (!atri_ir_is_pointer(type)) { return ATRI_IR_INVALID; }
+    if (type >= ATRI_IR_POINTER_LEVEL) { return (AtriIRType)(type-ATRI_IR_POINTER_LEVEL); }
     switch (type) {
         case ATRI_IR_PTR_VOID: return ATRI_IR_VOID;
         case ATRI_IR_PTR_U8: return ATRI_IR_U8;
@@ -23,6 +34,10 @@ AtriIRType atri_ir_pointee(AtriIRType type) {
     }
 }
 AtriIRType atri_ir_pointer_type(AtriIRType type) {
+    if (atri_ir_is_pointer(type)) {
+        if ((unsigned)type / ATRI_IR_POINTER_LEVEL + 1 >= ATRI_IR_MAX_POINTER_DEPTH) { return ATRI_IR_INVALID; }
+        return (AtriIRType)(type+ATRI_IR_POINTER_LEVEL);
+    }
     switch (type) {
         case ATRI_IR_VOID: return ATRI_IR_PTR_VOID;
         case ATRI_IR_U8: return ATRI_IR_PTR_U8;
@@ -51,11 +66,13 @@ AtriIRType atri_ir_builtin_type(const char *name, size_t length) {
 bool atri_ir_valid_type(const AtriIRProgram *p, AtriIRType type) {
     if (atri_ir_is_struct(type)) { return (size_t)(type-ATRI_IR_STRUCT) < p->struct_count && !p->structs[type-ATRI_IR_STRUCT].opaque; }
     if (atri_ir_is_array(type)) { return (size_t)(type-ATRI_IR_ARRAY) < p->array_count; }
-    if (type >= ATRI_IR_PTR_STRUCT) {
+    if (atri_ir_is_pointer(type)) {
+        type = (AtriIRType)(type % ATRI_IR_POINTER_LEVEL);
+        if (type < ATRI_IR_PTR_STRUCT) { return true; }
         AtriIRType target = atri_ir_pointee(type);
         return atri_ir_is_struct(target) ? (size_t)(target-ATRI_IR_STRUCT) < p->struct_count : atri_ir_is_array(target) && atri_ir_valid_type(p, target);
     }
-    return atri_ir_is_integer(type) || type == ATRI_IR_BOOL || atri_ir_is_pointer(type);
+    return atri_ir_is_integer(type) || type == ATRI_IR_BOOL;
 }
 size_t atri_ir_type_size(const AtriIRProgram *p, AtriIRType type) {
     if (type == ATRI_IR_VOID) { return 0; }
@@ -178,7 +195,7 @@ static AtriIRType length_type(AtriSource source, const AtriProgram *ast, AtriId 
         const AtriStatement *decl = length_constant(source, ast, e);
         return decl ? constant_type(source, ast, decl->type) : ATRI_IR_INVALID;
     }
-    if (e->kind == ATRI_EXPR_UNARY || e->kind == ATRI_EXPR_RUN) { return length_type(source, ast, e->left, depth+1, steps); }
+    if (e->kind == ATRI_EXPR_UNARY) { return length_type(source, ast, e->left, depth+1, steps); }
     if (e->kind == ATRI_EXPR_BINARY) {
         AtriIRType a = length_type(source, ast, e->left, depth+1, steps);
         AtriIRType b = length_type(source, ast, e->right, depth+1, steps);
@@ -231,7 +248,6 @@ static bool length_value(AtriSource source, const AtriProgram *ast, AtriIRProgra
         if (!decl) { return false; }
         return constant_type(source, ast, decl->type) == type && length_value(source, ast, p, d, decl->expression, type, depth+1, steps, out);
     }
-    if (e->kind == ATRI_EXPR_RUN) { return length_value(source, ast, p, d, e->left, type, depth+1, steps, out); }
     uint64_t a, b = 0;
     if (e->kind != ATRI_EXPR_UNARY && e->kind != ATRI_EXPR_BINARY) { return false; }
     if (e->kind == ATRI_EXPR_UNARY && e->op == ATRI_NEG && ast->expressions[e->left].kind == ATRI_EXPR_INTEGER) {
@@ -312,13 +328,14 @@ static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram
     AtriLexer lexer = atri_lexer_create(source); lexer.offset = span.start;
     AtriToken token = atri_lexer_next(&lexer, d);
     if (token.kind == ATRI_TOKEN_STAR) {
-        AtriLexer look = lexer;
-        AtriToken next = atri_lexer_next(&look, d);
-        if (next.kind == ATRI_TOKEN_LEFT_BRACKET) {
-            AtriIRType element;
-            if (!source_type(source, ast, p, (AtriSpan){next.span.start, span.end}, &element, d, depth+1, steps)) { return false; }
-            *out = atri_ir_pointer_type(element); return true;
+        AtriToken next = atri_lexer_next(&lexer, d);
+        AtriIRType target;
+        if (!source_type(source, ast, p, (AtriSpan){next.span.start, span.end}, &target, d, depth+1, steps)) { return false; }
+        *out = atri_ir_pointer_type(target);
+        if (*out == ATRI_IR_INVALID) {
+            *d = (AtriDiagnostic){span, "pointer nesting exceeds the prototype limit"}; return false;
         }
+        return true;
     }
     if (token.kind == ATRI_TOKEN_LEFT_BRACKET) {
         const AtriArrayType *syntax = NULL;
@@ -348,9 +365,6 @@ static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram
         }
         *out = (AtriIRType)(ATRI_IR_ARRAY+p->array_count-1); return true;
     }
-    size_t pointers = 0;
-    while (token.kind == ATRI_TOKEN_STAR) { ++pointers; token = atri_lexer_next(&lexer, d); }
-    if (pointers > 1) { *d = (AtriDiagnostic){span, "only one-level pointers are supported yet"}; return false; }
     AtriSpan name = token.span, qualifier = {0};
     AtriToken next = atri_lexer_next(&lexer, d);
     if (next.kind == ATRI_TOKEN_SCOPE && next.span.start < span.end) {
@@ -371,8 +385,6 @@ static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram
     if (type == ATRI_IR_INVALID) {
         *d = (AtriDiagnostic){span, "unknown or private type; expected a supported scalar, pointer, fixed array or declared struct/union"}; return false;
     }
-    if (pointers) { type = atri_ir_pointer_type(type); }
-    if (type == ATRI_IR_INVALID) { *d = (AtriDiagnostic){span, "only one-level pointers to supported scalars, arrays and structs/unions are supported"}; return false; }
     *out = type; return true;
 }
 bool atri_type_from_source(AtriSource source, const AtriProgram *ast, AtriIRProgram *p, AtriSpan span, AtriIRType *out, AtriDiagnostic *d) {

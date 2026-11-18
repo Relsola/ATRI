@@ -15,7 +15,7 @@ fn main() -> i32 {
         case Color::Green:
             { temporary: i32 = 20; value = temporary; }
             #through;
-        case #run (1 + 1):
+        case 1 + 1:
             value += 3;
         default:
             value = -1;

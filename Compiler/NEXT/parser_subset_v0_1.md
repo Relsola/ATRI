@@ -16,7 +16,7 @@ CLI 支持 `import "path";` 直接引入 export 名称和 `name :: import "path"
 
 一次编译中源模块只加载/解析一次。加载器先扫描依赖，再在保留文件边界的源码存储中解析 AST；各模块保持独立作用域，不是 include 文本拼贴。公开名称表建立后排序并二分查找；模块名称查找不生成运行时代码。没有跨次构建的接口缓存或增量失效，冷启动仍读取和检查所加载模块的完整源码，不据此宣称比 C 头文件更快。
 
-顶层允许 `export name: Type [= expression];`、私有普通变量及 `name: Type := expression;`。当前普通全局类型为八种定宽整数、bool、已有一层数据指针、结构体及 union；整数/bool 初始化器必须在编译期求值，可引用编译期常量、调用可解释执行的函数。指针静态初始化只支持 null 或省略初始化器；运行期可赋其他合法指针值。支持这些全局取地址、通过返回的指针读写；聚合静态初始化见后文对应小节。顶层数组全局、非零指针静态重定位初始化及指针/聚合编译期常量仍未支持。
+顶层允许 `export name: Type [= expression];`、私有普通变量及 `name: Type := expression;`。当前普通全局类型为八种定宽整数、bool、多级数据指针、结构体及 union。整数/bool 初始化器必须在编译期求值。指针静态初始化只支持 null 或省略初始化器。支持这些全局取地址及通过指针读写。顶层数组全局、非零指针静态重定位初始化及指针/聚合编译期常量仍待实现。
 
 导入访问指向原全局对象；普通赋值复制值。导出不加入锁、原子指令或运行期名称查找。所有模块先收集声明后检查函数体，因此跨模块递归可用；编译期依赖环及非法访问仍报错。CLI 错误按原模块路径、行列显示。当前一次生成包含各模块所需代码和全局数据的 `.s`，外部 Clang 完成汇编/链接；尚无独立模块接口/目标文件输出。
 
@@ -68,7 +68,7 @@ CLI 支持 `import "path";` 直接引入 export 名称和 `name :: import "path"
 
 switch、case/default、空标签组、显式 `#through;`、case 词法作用域和 break/continue 目标规则见[语言规范第 8.3 节](language_spec_v0_1.md#83-switch)。case 借用完整标量常量解释器，允许可解释执行的函数调用和显式 #run，求值后检查重复值；选择值只计算一次。实现使用比较链和现有多块 CFG，最多 1024 case，函数仍受 4096 块/实际栈帧上限限制；不生成运行期 case 求值、成员标签或穷尽检查，尚无跳转表。
 
-可运行示例见 [enum_switch.ar](../examples/enum_switch.ar)。[enum.ar](../examples/enum.ar) 保留为原始语法草稿，其中的 `switch(E1)` 和 `expr` 用于讨论语法。Payload 枚举、局部枚举定义及无命名空间的枚举成员访问尚未实现。
+可运行示例见 [enum_switch.ar](../examples/enum_switch.ar)。Payload 枚举、局部枚举定义及无命名空间的枚举成员访问尚未实现。
 
 ## 当前句法
 
@@ -98,7 +98,8 @@ statement  = declaration, ";" | run-statement, ";" | assignment, ";" | call, ";"
 switch     = "switch", "(", expression, ")", "{", {case}, "}" ;
 case       = ("case", expression | "default"), ":", {statement}, ["#through", ";"] ;
 if-statement = "if", "(", expression, ")", block, [ "else", (block | if-statement) ] ;
-run-statement = "#run", unary ;
+run-statement = run-call ;
+run-call   = "#run", call ;
 declaration = identifier, ":", type, (":=", expression | ["=", expression]) ;
 assignment = expression, ("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="), expression ;
 for-init   = declaration | assignment | call | run-statement ;
@@ -114,13 +115,13 @@ relational = shift, { ("<" | "<=" | ">" | ">="), shift } ;
 shift      = sum, { ("<<" | ">>"), sum } ;
 sum        = product, { ("+" | "-"), product } ;
 product    = unary, { ("*" | "/" | "%"), unary } ;
-unary      = ("+" | "-" | "&" | "*" | "!" | "~" | "#run"), unary | postfix ;
+unary      = ("+" | "-" | "&" | "*" | "!" | "~"), unary | postfix ;
 postfix    = primary, { ".", identifier | "[", expression, "]" } ;
 initializer = "{", [ initializer-item, { ",", initializer-item }, [ "," ] ], "}" ;
 initializer-item = expression | ".", identifier, "=", expression ;
 conversion = "cast", "(", type, ",", expression, ")" ;
 layout-query = ("sizeof" | "alignof"), "(", type, ")" ;
-primary    = conversion | layout-query | integer-literal | character-literal | string-literal | "true" | "false" | "null" | name | call | initializer
+primary    = conversion | layout-query | integer-literal | character-literal | string-literal | "true" | "false" | "null" | name | call | run-call | initializer
            | "(", expression, ")" ;
 name       = identifier, [ "::", identifier, ["::", identifier] ] ;
 call       = name, "(", [arguments], ")" ;
@@ -136,19 +137,19 @@ identifier-start = "A" ... "Z" | "a" ... "z" | "_" ;
 digit = "0" ... "9" ;
 ```
 
-`...` 只表示文法中的范围。赋值目标、已定型整数间的精确类型等由语义检查。优先级、结合性、短路和求值顺序按[主规范第 7.1 节](language_spec_v0_1.md#71-求值与副作用)。赋值和复合赋值是语句。普通函数调用和独立 `#run` 可以丢弃结果。`#run` 前缀绑定一个一元操作数。
+`...` 只表示文法中的范围。赋值目标、已定型整数间的精确类型等由语义检查。优先级、结合性、短路和求值顺序按[主规范第 7.1 节](language_spec_v0_1.md#71-求值与副作用)。赋值和复合赋值是语句。普通调用和 `#run` 调用可以丢弃结果。`#run` 接受直接函数调用。
 
 支持 ASCII 空白、LF/CRLF/CR、开头可选 UTF-8 BOM 和 // 行注释。暂不支持块注释、浮点、整数类型后缀、八进制整数、++/--、逗号表达式；聚合初始化之外不接受尾逗号。union 定义必须非空且成员声明不能有默认值，初始化最多指定一个成员。全角分号、源码 NUL、不支持的字符会诊断。
 
 ## 类型与运算
 
-- 八种定宽整数 i8/i16/i32/i64/u8/u16/u32/u64 完整覆盖局部/标量全局、字段/数组、参数/返回、:=、标量 #run、cast、布局查询与一层数据指针。自然布局按目标 1/2/4/8 字节计算。
+- 八种定宽整数 i8/i16/i32/i64/u8/u16/u32/u64 完整覆盖局部/标量全局、字段/数组、参数/返回、:=、标量 #run、cast、布局查询与多级数据指针。自然布局按目标 1/2/4/8 字节计算。
 - bool 布局为 1 字节、合法表示 0/1；只支持布尔逻辑与相等比较，不提供 bool/整数或 bool/指针转换。
 - 不提供内置 char 或旧语法别名。单引号字节字面量固定为 u8，支持普通整数运算、比较、常量/#run、指针读写和直接索引；i8 需要显式整数转换。双引号字面量固定为 *u8，正文为 UTF-8 字节并额外附加终止零；\xHH 恰好两位，拒绝八进制整数/转义，\0 不吸收后续数字。
 - 整数字面量和运算按已接受的[第 5.4/7.2 节](language_spec_v0_1.md#72-数值运算与比较)，包含无符号负号环绕、位运算、移位及复合赋值。无上下文纯整数默认 i32，指针偏移字面量默认 i64。
 - 实际执行的编译期非法除余/移位报错；可证明的非法移位数量在 -O0/-O1 均诊断。多块函数没有完整常量传播，不承诺发现所有非法除余。动态不增加检查；合法整数环绕不能使非法指针操作合法。
 - 复合赋值先固定左侧位置并读取旧值，再求右侧，仅计算一次左侧；覆盖名称、显式解引用、字段、数组元素和合法的指针 +=/-=。
-- 所有支持的数据指针都可复制、传参/返回、与同类型指针或 null 作 ==/!=；只有指针能与 null 比较。取地址/显式目标读写覆盖全部整数、bool、结构体/数组；*void/opaque 目标不能直接访问。无多层指针或默认动态检查，见[指针子集](pointer_subset_v0_1.md)。
+- 数据指针可复制、传参/返回、与同类型指针或 null 作 ==/!=。`&` 可对可变指针对象取地址，例如 `&p` 得到 `**u8`。每次 `*` 解引用一层。直接目标为 void 或 opaque 时禁止访问。多级指针仍使用现有地址大小，无默认动态检查，见[指针子集](pointer_subset_v0_1.md)。
 
 ## 整数转换与布局查询
 
@@ -196,7 +197,7 @@ for 初始化建立覆盖条件、迭代项及体的作用域，循环结束后�
 
 ## 编译期求值
 
-顶层和函数内支持 `#run f(args);`，可丢弃整数/bool 结果或执行 `void` 调用。标量 `#run expression` 可用于普通变量和 `:=` 常量的初始化器、返回和实参，关闭优化仍必须求值成功。`a: i32 = #run f();` 只在编译期取得初值，`a` 的赋值和作用域遵循普通变量规则。旧的 `#run` 声明前缀已移除。可执行示例见 [run_constants.ar](../tests/cases/run_constants.ar) 与 [arrays_run.ar](../tests/cases/arrays_run.ar)。
+顶层和函数内支持 `#run f(args);`，可丢弃整数/bool 结果或执行 `void` 调用。`#run f(args)` 可用于普通变量和常量的初始化器、返回和实参，关闭优化仍必须求值成功。`a: i32 = #run f();` 只在编译期取得初值，`a` 的赋值和作用域遵循普通变量规则。直接传给 `#run` 的必须是函数调用，函数实参仍可使用表达式。可执行示例见 [run_constants.ar](../tests/cases/run_constants.ar) 与 [arrays_run.ar](../tests/cases/arrays_run.ar)。
 
 按[规范第 12.1 节](language_spec_v0_1.md#121-能力边界)，`#run { ... }` 是无结果块，`#run -> Type { ... }` 是以显式 `return` 产生值的块表达式。两类代码块当前均报尚未实现。聚合结果、编译期指针/数组内存和 AST API 也仍待实现。
 

@@ -1,0 +1,51 @@
+struct Opaque;
+struct Link { target: **Link; }
+struct Globals { slot: **u8; }
+global: Globals = {.slot = null};
+byte: u8 = 'A';
+pointer: *u8;
+
+#extern(C) fn c_replace(slot: **u8, value: *u8) -> void;
+#extern(C) fn c_echo(slot: **u8) -> **u8;
+
+fn retarget(value: *u8) -> u8 {
+    current: *u8 = &byte;
+    slot: **u8 = &current;
+    *slot = value;
+    return *current;
+}
+
+fn triple(slot: ***u8, value: *u8) -> u8 {
+    **slot = value;
+    return ***slot;
+}
+
+fn swap_next(slots: **u8, value: *u8) -> i64 {
+    next: **u8 = slots + 1;
+    *next = value;
+    return next - slots;
+}
+
+fn via_c(slot: **u8, value: *u8) -> **u8 {
+    c_replace(slot, value);
+    return c_echo(slot);
+}
+
+fn cast_roundtrip(slot: **u8) -> **u8 {
+    erased: *void = cast(*void, slot);
+    return cast(**u8, erased);
+}
+
+fn opaque_slot(slot: **Opaque) -> *Opaque { return *slot; }
+fn link_slot(link: *Link) -> ***Link { return &(*link).target; }
+fn global_slot() -> **u8 { return &pointer; }
+fn global_is_null() -> bool { return global.slot == null; }
+fn layout() -> u64 { return sizeof(***u8) + alignof(**Opaque); }
+
+fn array_targets(value: *u8) -> u8 {
+    slots: [2]*u8;
+    list: *[2]*u8 = &slots;
+    indirect: **[2]*u8 = &list;
+    (**indirect)[1] = value;
+    return *slots[1];
+}

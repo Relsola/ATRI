@@ -2,7 +2,7 @@
 
 Compiler 是 ATRI 大型个人项目的基础子项目，也是当前建设的第一步，目标是实现一门以 DOP（面向数据编程）为核心取向、偏底层的强类型语言及可持续自举的原生编译器。
 
-首个目标平台为 Windows x86-64，Stage 0 使用 C23 实现。从源码解析、类型检查、编译期求值和 IR 验证到 x64 汇编输出，当前支持八种定宽整数、bool、一层数据指针、整数枚举、固定数组、结构体和无标签 union。已支持相对 `.ar` 导入、共享全局存储、聚合静态初始化、循环、`switch` 和标量 `#run` 求值。`defer`、`#run` 代码块、编译期 AST 修改和浮点运算等尚待实现。
+首个目标平台为 Windows x86-64，Stage 0 使用 C23 实现。从源码解析、类型检查、编译期求值和 IR 验证到 x64 汇编输出，当前支持八种定宽整数、bool、多级数据指针、整数枚举、固定数组、结构体和无标签 union。已支持相对 `.ar` 导入、共享全局存储、聚合静态初始化、循环、`switch` 和 `#run` 编译期函数调用。`defer`、`#run` 代码块、编译期 AST 修改和浮点运算等尚待实现。
 
 已增加 C 兼容 `*u8`、静态零结尾字符串字面量和 `#extern(C)` 外部调用，可以通过 puts/printf 打印。已支持当前类型范围内的 C 可变参数调用，并用 void 返回、*void、opaque FILE 和数据指针 cast 接通文件读写。稳定 ABI 目标与 C 一致，内置 string 暂缓；完整范围和限制见[外部调用子集](NEXT/parser_subset_v0_1.md#c-字符串与外部调用)。
 
@@ -60,7 +60,7 @@ clang .\build\read_file.s -o .\build\read_file.exe
 
 枚举示例见 [enum_switch.ar](examples/enum_switch.ar)：`Color :: enum { Red, Green, Count, }` 默认使用 i32，成员是普通整数，`1 + Color::Red`、数组长度和索引可直接使用；`Flags :: enum(bit8)` 自动生成 1、2、4，变量/计算结果仍允许 0。switch 选择值只求值一次，case 常量在编译期求得，非空分支默认结束，`#through;` 显式进入下一分支；case 不强制花括号。
 
-编译器指定能力采用 `#run`、`#extern(C)` 和 `#through`。cast、sizeof、alignof 保持运算符写法。`#run { ... }` 和 `#run -> Type { ... }` 分别定义无结果块与显式 `return` 的值块，两种写法当前均诊断尚未实现。原始枚举草稿与可执行示例分别位于 [enum.ar](examples/enum.ar) 和 [enum_switch.ar](examples/enum_switch.ar)。
+编译器指定能力采用 `#run`、`#extern(C)` 和 `#through`。`#run` 的调用形式仅接收直接函数调用。`#run { ... }` 和 `#run -> Type { ... }` 分别定义无结果块与显式 `return` 的值块，两种写法当前均诊断尚未实现。可运行的枚举和分支示例见 [enum_switch.ar](examples/enum_switch.ar)。
 
 ## 文档
 

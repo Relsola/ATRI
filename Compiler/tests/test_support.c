@@ -84,7 +84,8 @@ void test_expect_return(const TestIR *ir, const char *function, AtriIRType type,
         if (ret.left >= i || body->instructions[ret.left].kind != ATRI_IR_CONST ||
             ret.type != type || body->instructions[ret.left].type != type ||
             body->instructions[ret.left].immediate != bits) {
-            fprintf(stderr, "Expected: every return is constant %s %" PRId64 "\n", atri_ir_type_name(type), expected);
+            char type_name[ATRI_IR_TYPE_NAME_SIZE];
+            fprintf(stderr, "Expected: every return is constant %s %" PRId64 "\n", atri_ir_type_name(type, type_name), expected);
             ir_failure(ir, function, file, line);
         }
     }

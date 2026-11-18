@@ -34,6 +34,19 @@ static void invalid_memory_operands(void) {
     move->instructions[offset].right = move->instructions[offset].left;
     EXPECT_INVALID_IR(test.before);
     test_destroy(&test);
+
+    test = test_compile("invalid pointer depth", "fn read(p:**u8)->*u8{return *p;}", TEST_NO_OPT);
+    AtriIRFunction *read = test_function(&test.before, "read");
+    AtriId parameter = test_instruction(&test.before, "read", ATRI_IR_PARAM, 0);
+    AtriIRType original = read->parameter_types[0];
+    read->parameter_types[0] = ATRI_IR_PTR_U8;
+    read->instructions[parameter].type = ATRI_IR_PTR_U8;
+    EXPECT_INVALID_IR(test.before);
+    read->parameter_types[0] = original;
+    read->instructions[parameter].type = original;
+    EXPECT_VALID_IR(test.before);
+    CHECK(!atri_ir_valid_type(&test.before.program, (AtriIRType)(ATRI_IR_POINTER_LEVEL + ATRI_IR_U8)));
+    test_destroy(&test);
 }
 
 static void invalid_control_flow(void) {

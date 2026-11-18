@@ -170,7 +170,7 @@ static void struct_ast(void) {
     atri_program_destroy(&program);
 }
 static void array_and_run_ast(void) {
-    AtriSource input = source("n:i32 := #run 2;fn f()->i32{data:[2][2]u8={{1,2},{3,4}};return #run (true?1:false?2:3);}");
+    AtriSource input = source("n:i32 := #run f();fn f()->i32{data:[2][2]u8={{1,2},{3,4}};return #run pick(true?1:false?2:3);}");
     AtriProgram p;
     AtriDiagnostic d;
     CHECK(atri_parse(input, &p, &d));
@@ -178,12 +178,16 @@ static void array_and_run_ast(void) {
     CHECK(p.array_type_count == 2 && p.initializer_count == 6);
     const AtriExpr *run = &p.expressions[p.statements[1].expression];
     CHECK(run->kind == ATRI_EXPR_RUN);
-    const AtriExpr *select = &p.expressions[run->left];
+    const AtriExpr *call = &p.expressions[run->left];
+    CHECK(call->kind == ATRI_EXPR_CALL && call->argument_count == 1);
+    const AtriExpr *select = &p.expressions[p.arguments[call->first_argument]];
     CHECK(select->kind == ATRI_EXPR_CONDITIONAL && p.expressions[select->alternative].kind == ATRI_EXPR_CONDITIONAL);
     atri_program_destroy(&p);
     reject(source("fn f()->i32{a:[2]i32;return a[0;}"), "expected ']'");
     reject(source("fn f()->i32{return true?1;}"), "expected ':'");
-    input = source("n:i32= #run 1+2;fn f()->i32{a:i32= #run 3+4;return a;}");
+    reject(source("fn f()->i32{return #run (1+1);}"), "requires a direct function call");
+    reject(source("fn f()->i32{return #run value;}"), "requires a direct function call");
+    input = source("n:i32= #run f()+2;fn f()->i32{a:i32= #run f()+4;return a;}");
     CHECK(atri_parse(input, &p, &d));
     CHECK(p.globals[0].declaration.kind == ATRI_STMT_VARIABLE);
     const AtriExpr *global = &p.expressions[p.globals[0].declaration.expression];
