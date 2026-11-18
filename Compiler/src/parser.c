@@ -257,12 +257,18 @@ static bool parse_expression(Parser *p, int minimum, AtriId *result) {
     if (!parse_primary(p, &left)) goto done;
     for (;;) {
         if (p->current.kind == ATRI_TOKEN_LEFT_BRACKET) {
-            advance(p);
-            AtriId index;
-            if (!parse_expression(p, 0, &index)) { goto done; }
-            AtriExpr e = {.kind = ATRI_EXPR_INDEX, .left = left, .right = index,
-                .span = {p->program.expressions[left].span.start, p->current.span.end}};
-            if (!expect(p, ATRI_TOKEN_RIGHT_BRACKET, "expected ']' after index") || !append_expr(p, e, &left)) { goto done; }
+            /* 逗号索引沿用嵌套索引 AST，每个维度分别定型和检查。 */
+            do {
+                advance(p);
+                AtriId index;
+                if (!parse_expression(p, 0, &index)) { goto done; }
+                size_t end = p->current.kind == ATRI_TOKEN_RIGHT_BRACKET ? p->current.span.end :
+                    p->program.expressions[index].span.end;
+                AtriExpr e = {.kind = ATRI_EXPR_INDEX, .left = left, .right = index,
+                    .span = {p->program.expressions[left].span.start, end}};
+                if (!append_expr(p, e, &left)) { goto done; }
+            } while (p->current.kind == ATRI_TOKEN_COMMA);
+            if (!expect(p, ATRI_TOKEN_RIGHT_BRACKET, "expected ']' after index")) { goto done; }
             continue;
         }
         if (p->current.kind == ATRI_TOKEN_DOT) {
@@ -547,6 +553,19 @@ static bool parse_statement(Parser *p, AtriId *id) {
             s.kind = ATRI_STMT_RETURN; advance(p);
             if (p->current.kind != ATRI_TOKEN_SEMICOLON && !parse_expression(p, 0, &s.expression)) goto done;
             semicolon = true; break;
+        case ATRI_TOKEN_DEFER:
+            s.kind = ATRI_STMT_DEFER; advance(p);
+            if (p->current.kind == ATRI_TOKEN_LEFT_PAREN && !condition(p, &s.expression)) { goto done; }
+            if (p->current.kind == ATRI_TOKEN_LEFT_BRACE) {
+                if (!parse_block(p, &s.body)) { goto done; }
+            } else {
+                if (!parse_expression(p, 0, &s.target)) { goto done; }
+                if (p->program.expressions[s.target].kind != ATRI_EXPR_CALL) {
+                    fail(p, "defer requires a block or a direct function call"); goto done;
+                }
+                semicolon = true;
+            }
+            break;
         case ATRI_TOKEN_BREAK: case ATRI_TOKEN_CONTINUE:
             s.kind = token == ATRI_TOKEN_BREAK ? ATRI_STMT_BREAK : ATRI_STMT_CONTINUE;
             advance(p); semicolon = true; break;
@@ -834,7 +853,7 @@ static void dump_statement(FILE *s, AtriSource source, const AtriProgram *p, Atr
     const AtriStatement *st = &p->statements[id];
     if (st->kind == ATRI_STMT_BLOCK) { dump_block(s, source, p, st->body, indent); return; }
     static const char *names[] = {"Constant", "Variable", "Assign", "Return", "Block", "If", "While", "Do",
-        "For", "Loop", "Break", "Continue", "Expression", "Switch"};
+        "For", "Loop", "Break", "Continue", "Expression", "Switch", "Defer"};
     fprintf(s, "%*s%s", indent, "", names[st->kind]);
     if (st->kind == ATRI_STMT_CONSTANT || st->kind == ATRI_STMT_VARIABLE) {
         fputc(' ', s); write_span(s, source, st->name); fputs(": ", s); write_span(s, source, st->type);
@@ -848,6 +867,9 @@ static void dump_statement(FILE *s, AtriSource source, const AtriProgram *p, Atr
         } else { fputs(" = ", s); }
     } else if (st->expression != ATRI_NONE) fputc(' ', s);
     if (st->expression != ATRI_NONE) dump_expr(s, source, p, st->expression);
+    if (st->kind == ATRI_STMT_DEFER && st->target != ATRI_NONE) {
+        fputc(' ', s); dump_expr(s, source, p, st->target);
+    }
     fputc('\n', s);
     if (st->kind == ATRI_STMT_SWITCH) {
         for (size_t i = 0; i < st->case_count; ++i) {

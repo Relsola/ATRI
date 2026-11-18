@@ -164,7 +164,7 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
         for (size_t i = 0; i < p->global_count; ++i) {
             const AtriIRGlobal *g = &p->globals[i];
             if (g->constant) { continue; }
-            if (atri_ir_is_struct(g->type)) {
+            if (atri_ir_is_aggregate(g->type)) {
                 fprintf(s, ".balign %zu\n.Latri_global_%zu:\n", atri_ir_type_align(p, g->type), i);
                 /* 零大小对象保留一个地址锚点，不改变语言可见的 sizeof。 */
                 if (!g->data_size) { fputs("    .byte 0\n", s); }

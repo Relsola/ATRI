@@ -65,7 +65,7 @@ typedef struct {
     AtriIRType type;
     uint64_t bits;
     bool constant;
-    unsigned char *data; /* struct/union 初始对象表示，由 Global 拥有；标量仍使用 bits。 */
+    unsigned char *data; /* 聚合初始对象表示，由 Global 拥有；标量仍使用 bits。 */
     size_t data_size;
 } AtriIRGlobal;
 

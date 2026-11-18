@@ -178,9 +178,9 @@ void atri_dump_ir(FILE *s, AtriSource source, const AtriIRProgram *p) {
     }
     for (size_t i = 0; i < p->global_count; ++i) {
         const AtriIRGlobal *g = &p->globals[i];
-        if (atri_ir_is_struct(g->type)) {
-            fprintf(s, "global @global.%zu %.*s: struct.%u size %zu align %zu = bytes [", i,
-                (int)(g->name.end-g->name.start), source.text+g->name.start, (unsigned)(g->type-ATRI_IR_STRUCT),
+        if (atri_ir_is_aggregate(g->type)) {
+            fprintf(s, "global @global.%zu %.*s: %s size %zu align %zu = bytes [", i,
+                (int)(g->name.end-g->name.start), source.text+g->name.start, atri_ir_type_name(g->type, type_name),
                 g->data_size, atri_ir_type_align(p, g->type));
             for (size_t b = 0; b < g->data_size; ++b) { fprintf(s, "%s%02x", b ? " " : "", (unsigned)g->data[b]); }
             fputs("]\n", s); continue;

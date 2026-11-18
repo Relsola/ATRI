@@ -1,0 +1,6 @@
+seed: i32 := 3;
+export mat: [2][3]i32 = {{twice(seed), 2}, {4}};
+
+fn twice(x: i32) -> i32 { return x + x; }
+
+export fn view() -> *[2][3]i32 { return &mat; }

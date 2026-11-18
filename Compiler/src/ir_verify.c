@@ -347,15 +347,15 @@ bool atri_ir_verify(const AtriIRProgram *p, AtriDiagnostic *d) {
     for (size_t i = 0; i < p->global_count; ++i) {
         const AtriIRGlobal *g = &p->globals[i];
         if (!atri_ir_valid_type(p, g->type)) { return bad(d, g->name, "IR verifier: invalid global type"); }
-        if (atri_ir_is_struct(g->type)) {
+        if (atri_ir_is_aggregate(g->type)) {
             size_t steps = 100000;
             if (g->constant || g->bits || !g->data || g->data_size != atri_ir_type_size(p, g->type) ||
                 !static_object(p, g->type, g->data, 0, &steps)) {
-                return bad(d, g->name, "IR verifier: invalid static struct initializer");
+                return bad(d, g->name, "IR verifier: invalid static aggregate initializer");
             }
             continue;
         }
-        if (g->data || g->data_size || atri_ir_is_aggregate(g->type) || (atri_ir_is_integer(g->type) && g->bits > atri_integer_mask(g->type)) ||
+        if (g->data || g->data_size || (atri_ir_is_integer(g->type) && g->bits > atri_integer_mask(g->type)) ||
             (g->type == ATRI_IR_BOOL && g->bits > 1) || (atri_ir_is_pointer(g->type) && g->bits != 0)) {
             return bad(d, g->name, "IR verifier: invalid global initial value");
         }

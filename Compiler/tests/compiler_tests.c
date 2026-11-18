@@ -270,6 +270,12 @@ static void arrays_and_run(void) {
     EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32={.x=1};return 0;}", "positional");
     EXPECT_COMPILE_ERROR("struct S{x:i32;}fn f()->i32{s:S={1};return 0;}", "named fields");
     EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32;return a[true];}", "index requires");
+    EXPECT_COMPILE_ERROR("a:[2][3]i32;fn f()->i32{return a[2,0];}", "out of bounds");
+    EXPECT_COMPILE_ERROR("a:[2][3]i32;fn f()->i32{return a[1,3];}", "out of bounds");
+    EXPECT_COMPILE_ERROR("a:[2][3]i32;fn f()->i32{return a[1,false];}", "index requires");
+    EXPECT_COMPILE_ERROR("a:[2][3]i32;fn f()->i32{return a[1,2,0];}", "fixed array");
+    EXPECT_COMPILE_ERROR("fn f(a:[2][3]i32)->i32{a[0,1]=2;return 0;}", "read-only");
+    EXPECT_PARSE_ERROR("a:[2][3]i32;fn f()->i32{return a[1,];}", "expression");
     EXPECT_COMPILE_ERROR("fn f(a:[2]i32)->i32{a[0]=1;return 0;}", "read-only");
     EXPECT_COMPILE_ERROR("fn f()->[2]i32{return {1,2};}fn g()->i32{f()[0]=1;return 0;}", "temporary array");
     EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32;b:[3]i32=a;return 0;}", "type mismatch");
@@ -301,7 +307,6 @@ static void arrays_and_run(void) {
     EXPECT_COMPILE_ERROR("N:i32 :=2;fn f()->i32{N:i32=3;a:[N]i32;return 0;}", "array length");
     EXPECT_COMPILE_ERROR("N:i32 :=2;fn f()->i32{for(N:i32=3;false;){a:[N]i32;}return 0;}", "array length");
     EXPECT_COMPILE_ERROR("#extern(C)fn f(a:[2]i32)->i32;", "arrays and zero-size");
-    EXPECT_COMPILE_ERROR("a:[2]i32;fn main()->i32{return 0;}", "array storage");
     EXPECT_COMPILE_ERROR("fn f()->i32{a:[2]i32 := {1,2};return 0;}", "array constants");
     EXPECT_COMPILE_ERROR("fn id(a:i32)->i32{return a;}fn f()->i32{a:[2]i32;return #run id(a[0]);}", "runtime variable or parameter");
     EXPECT_COMPILE_ERROR("fn f()->i32{n:i32 :=f();a:[n]i32;return 0;}", "array length");
@@ -492,7 +497,26 @@ static void static_struct_globals(void) {
     EXPECT_COMPILE_ERROR("struct S{p:*i32;}n:i32;g:S={.p=&n};", "compile-time pointer");
     EXPECT_COMPILE_ERROR("struct S{a:[2]u8;}g:S={.a={1,2,3}};", "too many array initializer");
     EXPECT_COMPILE_ERROR("struct S{a:[2]u8;}g:S={.a={.x=1}};", "positional elements");
-    EXPECT_COMPILE_ERROR("struct S{x:i32;}g:[1]S;", "global array storage");
+}
+static void static_array_globals(void) {
+    Compilation test = test_compile("static array storage",
+        "struct S{x:i16=-2;flag:bool=true;}g:[2][2]S={{{.x=257}}};"
+        "empty:[0]i64;fn main()->i32{return 0;}", TEST_O0);
+    const AtriIRGlobal *globals = test.before.program.globals;
+    const unsigned char expected[] = {1,1,1,0,254,255,1,0,254,255,1,0,254,255,1,0};
+    CHECK(globals[0].data_size == sizeof(expected));
+    CHECK(memcmp(globals[0].data, expected, sizeof(expected)) == 0);
+    CHECK(globals[1].data != NULL && globals[1].data_size == 0);
+    EXPECT_VALID_IR(test.before);
+    test_destroy(&test);
+
+    EXPECT_COMPILE_ERROR("a:[1]i32={1,2};", "too many array initializer");
+    EXPECT_COMPILE_ERROR("a:[1][1]i32={{1,2}};", "too many array initializer");
+    EXPECT_COMPILE_ERROR("a:[1]i32={.x=1};", "positional elements");
+    EXPECT_COMPILE_ERROR("a:[1]i32; b:[1]i32=a;", "brace initializer");
+    EXPECT_COMPILE_ERROR("a:[1]i32 := {1};", "array constants");
+    EXPECT_COMPILE_ERROR("a:[1]i32;b:[1]i32={a[0]};", "runtime global");
+    EXPECT_COMPILE_ERROR("a:[1]*u8={\"text\"};", "supports null only");
 }
 static void union_layout_and_initialization(void) {
     Compilation test = test_compile("union static layout",
@@ -589,6 +613,7 @@ int main(void) {
     enums_and_switch();
     union_layout_and_initialization();
     static_struct_globals();
+    static_array_globals();
     basic_integer_types_and_operators();
     c_variadic_and_void();
     conversions_and_layout();

@@ -102,10 +102,29 @@ static void constants(void) {
     EXPECT_COMPILE_ERROR("fn f()->bool{n:bool :=false||(1/0==0);return n;}", "by zero");
     EXPECT_COMPILE_ERROR("fn f(n:i32)->bool{b:bool :=false&&(n==0);return b;}", "runtime variable");
 }
+static void defer_statements(void) {
+    computed("fn f()->i32{v:i32 := g();return v;}"
+        "fn g()->i32{x:i32=0;ok:bool;{defer(ok){x=x*10+1;}defer{x=x*10+2;ok=true;}}return x;}",
+        21, ATRI_IR_I32);
+    computed("fn f()->i32{v:i32 := g();return v;}"
+        "fn g()->i32{x:i32=4;defer{x=9;}return x;}", 4, ATRI_IR_I32);
+    computed("fn f()->i32{v:i32 := g();return v;}"
+        "#extern(C)fn ext()->i32;fn g()->i32{defer(false) ext();return 7;defer ext();}", 7, ATRI_IR_I32);
+    EXPECT_PARSE_ERROR("fn f()->void{defer x+1;}", "block or a direct function call");
+    EXPECT_PARSE_ERROR("fn f()->void{defer f()}", "expected ';'");
+    EXPECT_COMPILE_ERROR("fn f()->void{defer(1){}}", "type mismatch");
+    EXPECT_COMPILE_ERROR("fn f()->void{defer(false){missing();}}", "unknown function");
+    EXPECT_COMPILE_ERROR("fn f()->void{defer{g(x);}x:i32;}fn g(x:i32)->void{}", "unknown local");
+    EXPECT_COMPILE_ERROR("fn f()->void{defer{return;}}", "cannot return from a defer body");
+    EXPECT_COMPILE_ERROR("fn f()->void{loop{defer{break;}break;}}", "target inside that body");
+    EXPECT_COMPILE_ERROR("fn f()->void{loop{defer{continue;}break;}}", "target inside that body");
+    EXPECT_COMPILE_ERROR("fn f()->void{defer{switch(1){case 1: case 1: break;}}}", "duplicate switch case");
+}
 int main(void) {
     syntax();
     types_and_scopes();
     constants();
+    defer_statements();
     puts("control flow tests passed");
     return 0;
 }

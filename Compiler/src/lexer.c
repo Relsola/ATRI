@@ -71,7 +71,7 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
             {"true", ATRI_TOKEN_TRUE}, {"false", ATRI_TOKEN_FALSE},
             {"if", ATRI_TOKEN_IF}, {"else", ATRI_TOKEN_ELSE}, {"while", ATRI_TOKEN_WHILE},
             {"do", ATRI_TOKEN_DO}, {"for", ATRI_TOKEN_FOR}, {"loop", ATRI_TOKEN_LOOP},
-            {"break", ATRI_TOKEN_BREAK}, {"continue", ATRI_TOKEN_CONTINUE}
+            {"break", ATRI_TOKEN_BREAK}, {"continue", ATRI_TOKEN_CONTINUE}, {"defer", ATRI_TOKEN_DEFER}
         };
         for (size_t i = 0; i < sizeof(keywords) / sizeof(*keywords); ++i)
             if (count == strlen(keywords[i].name) && memcmp(text + start, keywords[i].name, count) == 0) {

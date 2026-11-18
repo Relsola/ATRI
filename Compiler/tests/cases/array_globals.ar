@@ -1,0 +1,29 @@
+state :: import "modules/array_state";
+again :: import "modules/./array_state";
+
+order: i32;
+cube: [2][2][2]i32 = {{{1, 2}}};
+zeroes: [2]i32;
+pointers: [2]*i32 = {null};
+empty: [0]i64 = {};
+
+fn view() -> *[2][3]i32 {
+    order = order * 10 + 1;
+    return state::view();
+}
+fn row() -> i32 { order = order * 10 + 2; return 0; }
+fn column() -> i32 { order = order * 10 + 3; return 1; }
+
+fn main() -> i32 {
+    if (state::mat[0, 0] != 6 || state::mat[1, 0] != 4 || state::mat[1, 2] != 0) { return 1; }
+    if (zeroes[1] != 0 || pointers[1] != null || sizeof([0]i64) != 0) { return 2; }
+    (*view())[row(), column()] += 7;
+    if (order != 123 || again::mat[0][1] != 9) { return 3; }
+    address: *i32 = &state::mat[0, 1];
+    *address = 11;
+    if (again::mat[0, 1] != 11) { return 4; }
+    cube[1, 0] = cube[0, 0];
+    cube[1, 0, 0] = 8;
+    if (cube[1, 0][1] != 2 || cube[0, 0, 0] != 1 || cube[1, 0, 0] != 8) { return 5; }
+    return 0;
+}

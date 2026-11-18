@@ -101,15 +101,21 @@ AST 结构检查保留在前端测试；跳转目标、支配关系、访存类�
 
 [struct_globals.ar](../examples/struct_globals.ar) 验证普通结构体全局的默认/指定静态初始化和整体复制。[globals.ar](cases/structs/globals.ar) 与 [struct_globals_harness.c](struct_globals_harness.c) 在 -O0/-O1 下验证嵌套结构体、字段数组、编译期标量调用、符号/高位整数、null 指针、自然对齐、值快照及 C 指针写入；[global_modules.ar](cases/structs/global_modules.ar) 验证重复导入共享对象、导出类型及字段默认值在定义模块解析，[global_empty.ar](cases/structs/global_empty.ar) 验证零大小全局和无显式项的巨大零大小子树。
 
-compiler 专项核对最终 IR 的目标初始字节及临时函数已删除，并拒绝聚合调用/复制初值、运行期依赖、非零静态指针、非法字段/数组项和顶层数组全局。Verifier 专项检查错误缓冲区长度、bool/指针表示和非法聚合常量标记。这些检查不代表完整聚合编译期执行、地址重定位或复制优化已完成。
+compiler 专项核对最终 IR 的目标初始字节及临时函数已删除，并拒绝聚合调用/复制初值、运行期依赖、非零静态指针和非法字段/数组项。Verifier 专项检查错误缓冲区长度、bool/指针表示和非法聚合常量标记。
 
 ## 数组与 #run 回归
 
 [cases/arrays_run.ar](cases/arrays_run.ar) 在 -O0/-O1 下编译、链接、原生执行，覆盖局部长度常量/遮蔽、数组默认/部分/嵌套初始化、初始化求值顺序、复制、参数/返回、数组指针、嵌套索引与字段写入、零大小元素、u8 环绕/无符号除余和短路条件表达式。结构化例子与运行期调用副作用用于验证实际路径，不把 IR 常量断言当作机器执行结果。
 
+[array_globals.ar](cases/array_globals.ar) 在两种优化等级下验证静态初始化、模块共享和多维索引，包含求值顺序、一次求值、子数组赋值及元素取地址。compiler 专项检查静态初始字节和每一维的诊断。
+
 [run_constants.ar](cases/run_constants.ar) 在两种优化等级下均只生成 `main` 并直接返回 2。compiler 测试核对优化前 IR 的调用清除、编译期输入限制，以及条件未选分支的求值行为。arrays_run 原生用例覆盖初始化器内的 `#run`、对具有编译期初值的普通变量的写入和 `for` 初始化。
 
 [array_harness.c](array_harness.c) 对 [array_abi.ar](cases/array_abi.ar) 做双向 C 调用，核对 u8 的寄存器/栈参数、返回与指针写入，以及内嵌数组的 4/24 字节结构体布局、参数和返回。测试绑定生成器按元素类型与维度生成 C 字段声明，不伪造 C 按值数组参数。
+
+## 延迟清理回归
+
+[defer_cleanup.ar](cases/defer_cleanup.ar) 在 -O0/-O1 下验证四种语法、条件和实参的清理时求值、逆序、名字遮蔽、嵌套 defer、标量及聚合返回值，以及 `continue`、`break` 与 `#through;` 的清理边界。control-flow 专项检查编译期调用内的清理和非法语法、条件类型、不可见名称及跨边界跳转的诊断。
 
 compiler/front-end 测试覆盖索引静态越界、零长度访问、初始化过量/错误形式、只读参数、临时值写入、数组类型不匹配、运行期长度、递归布局及字节范围。Verifier 另构造错误索引类型/引用和循环数组描述，不能用 native 用例代替这些不变量检查。当前无动态越界检查、性能测量或复制最少证明。
 

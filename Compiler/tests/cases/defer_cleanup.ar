@@ -1,0 +1,85 @@
+log: i32;
+payload: [2]i32 = {3, 4};
+
+fn record(value: i32) -> i32 {
+    log = log * 10 + value;
+    return value;
+}
+
+fn finish() -> void { record(5); }
+
+fn order() -> i32 {
+    value: i32 = 1;
+    enabled: bool;
+    defer (enabled) record(value);
+    defer { record(value + 1); }
+    defer (enabled) { record(9); }
+    defer { enabled = true; value = 4; }
+    defer (record(8) == 0) record(0);
+    return value;
+    defer record(0);
+}
+
+fn loop_cleanup() -> i32 {
+    result: i32;
+    defer record(7);
+    for (i: i32 = 0; i < 4; i += 1) {
+        defer { result = result * 10 + i + 1; }
+        switch (i) {
+            case 0:
+                defer { result += 1; }
+                continue;
+            case 1:
+                defer { result += 2; }
+                #through;
+            case 2:
+                defer { result += 3; }
+                break;
+        }
+        if (i == 2) { break; }
+    }
+    return result;
+}
+
+fn shadow(stop: bool) -> void {
+    value: i32 = 1;
+    {
+        defer record(value);
+        defer {
+            local: i32 = 2;
+            defer record(local);
+            loop { defer record(3); break; }
+            switch (local) { case 2: record(4); }
+        }
+        value: i32 = 9;
+        if (stop) { return; }
+        record(value);
+    }
+    defer finish();
+}
+
+fn snapshot() -> [2]i32 {
+    defer { payload[0] = 8; }
+    return payload;
+}
+
+fn address() -> *i32 {
+    defer { payload[0] = 9; }
+    return &payload[0];
+}
+
+fn main() -> i32 {
+    if (order() != 1 || log != 8954) { return 1; }
+    log = 0;
+    if (loop_cleanup() != 1653 || log != 7) { return 2; }
+    log = 0;
+    shadow(true);
+    if (log != 3421) { return 3; }
+    log = 0;
+    shadow(false);
+    if (log != 934215) { return 4; }
+    copy: [2]i32 = snapshot();
+    if (copy[0] != 3 || copy[1] != 4 || payload[0] != 8) { return 5; }
+    if (*address() != 9) { return 6; }
+    return 0;
+}

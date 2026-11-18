@@ -54,7 +54,7 @@ typedef enum {
     ATRI_STMT_CONSTANT, ATRI_STMT_VARIABLE, ATRI_STMT_ASSIGN, ATRI_STMT_RETURN,
     ATRI_STMT_BLOCK, ATRI_STMT_IF, ATRI_STMT_WHILE, ATRI_STMT_DO,
     ATRI_STMT_FOR, ATRI_STMT_LOOP, ATRI_STMT_BREAK, ATRI_STMT_CONTINUE, ATRI_STMT_EXPR,
-    ATRI_STMT_SWITCH
+    ATRI_STMT_SWITCH, ATRI_STMT_DEFER
 } AtriStmtKind;
 typedef struct {
     AtriStmtKind kind;
@@ -62,7 +62,7 @@ typedef struct {
     AtriOp op;
     AtriSpan span, name, type;
     AtriId expression;
-    AtriId target;
+    AtriId target; /* 赋值目标，或 defer 的单调用表达式。 */
     AtriId body, otherwise, initializer, step;
     size_t first_case, case_count;
 } AtriStatement;
