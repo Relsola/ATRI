@@ -410,3 +410,9 @@ fn byte_literal_index() -> i32 {
 fn fixed_hex_literal() -> *u8 {
     return "\x41B\012";
 }
+fn xor_bit31(value: u64) -> u64 {
+    return value ^ 0x80000000;
+}
+fn xor_bits31_to_63(value: u64) -> u64 {
+    return value ^ 0xffffffff80000000;
+}

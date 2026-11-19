@@ -148,6 +148,19 @@ static void invalid_structs(void) {
     get->instructions[field].type = ATRI_IR_I64;
     EXPECT_VALID_IR(test.after);
     test_destroy(&test);
+
+    test = test_compile("field through a stored pointer",
+        "struct S{v:i32;}g:*S;fn get()->i32{return (*g).v;}", TEST_NO_OPT);
+    get = test_function(&test.before, "get");
+    field = test_instruction(&test.before, "get", ATRI_IR_FIELD, 0);
+    AtriId pointer = get->instructions[field].left;
+    CHECK(get->instructions[pointer].kind == ATRI_IR_LOAD);
+    /* 绕开 LOAD 后，基址指向存放指针的全局槽，字段访问会错误地读到指针自身的字节。 */
+    get->instructions[field].left = get->instructions[pointer].left;
+    EXPECT_INVALID_IR(test.before);
+    get->instructions[field].left = pointer;
+    EXPECT_VALID_IR(test.before);
+    test_destroy(&test);
 }
 static void invalid_arrays(void) {
     Compilation test = test_compile("array verifier", "fn f(a:[2]i32,i:i32)->i32{return a[i];}", TEST_O0);

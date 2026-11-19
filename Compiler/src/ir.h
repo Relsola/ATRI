@@ -99,7 +99,7 @@ typedef struct {
     size_t string_count, string_capacity;
 } AtriIRProgram;
 
-bool atri_lower(AtriSource source, const AtriProgram *ast,
+bool atri_lower(AtriSource source, AtriProgram *ast,
                 AtriIRProgram *out, AtriDiagnostic *diagnostic);
 bool atri_ir_verify(const AtriIRProgram *program, AtriDiagnostic *diagnostic);
 bool atri_optimize(AtriIRProgram *program, bool inline_functions, AtriDiagnostic *diagnostic);

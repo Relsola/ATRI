@@ -18,6 +18,11 @@ static void symbol(FILE *s, AtriSource source, const AtriIRProgram *p, AtriId f)
     }
 }
 static bool wide(AtriIRType type) { return type == ATRI_IR_I64 || type == ATRI_IR_U64 || atri_ir_is_pointer(type); }
+static int64_t immediate_value(const AtriIRInst *constant) {
+    if (wide(constant->type)) { return atri_i64_signed(constant->immediate); }
+    if (atri_integer_is_signed(constant->type)) { return atri_integer_signed(constant->type, constant->immediate); }
+    return (int64_t)constant->immediate;
+}
 static const char *word(AtriIRType type) { return wide(type) ? "QWORD" : "DWORD"; }
 static const char *width_word(size_t width) { return width == 1 ? "BYTE" : width == 2 ? "WORD" : width == 4 ? "DWORD" : "QWORD"; }
 /* 所有窄整数临时值规范化到 32 位；对象本身仍按目标类型的真实宽度读写。 */
@@ -67,40 +72,75 @@ static void load(FILE *s, const AtriIRProgram *p, const AtriIRFunction *f, const
     if (v->kind == ATRI_IR_ADDRESS) { object_address(s, p, f, slots, v->left, reg64); }
     else if (v->kind == ATRI_IR_STRING) { fprintf(s, "    lea %s, [rip + .Latri_string_%" PRIu64 "]\n", reg64, v->immediate); }
     else if (v->kind == ATRI_IR_CONST) {
-        fprintf(s, "    mov %s, %" PRId64 "\n", reg, wide(v->type) ? atri_i64_signed(v->immediate) : atri_integer_is_signed(v->type) ? atri_integer_signed(v->type, v->immediate) : (int64_t)v->immediate);
+        fprintf(s, "    mov %s, %" PRId64 "\n", reg, immediate_value(v));
     } else if (atri_ir_is_aggregate(v->type)) {
         size_t size = atri_ir_type_size(p, v->type);
         if (size == 0) { fprintf(s, "    xor %s, %s\n", reg32, reg32); }
         else { fprintf(s, "    %s %s, %s PTR [rsp + %zu]\n", size < 4 ? "movzx" : "mov", size == 8 ? reg64 : reg32, width_word(size), slots[id]); }
     } else { fprintf(s, "    mov %s, %s PTR [rsp + %zu]\n", reg, word(v->type), slots[id]); }
 }
-static size_t outgoing_size(const AtriIRProgram *p, const AtriIRFunction *f) {
-    size_t size = 0;
-    for (size_t i = 0; i < f->instruction_count; ++i) {
-        const AtriIRInst *v = &f->instructions[i];
-        if (v->kind == ATRI_IR_CALL) {
-            size_t arguments = v->argument_count + (size_t)indirect(p, v->type);
-            size_t bytes = 32 + (arguments > 4 ? (arguments-4)*8 : 0);
-            if (bytes > size) { size = bytes; }
+/* 左操作数已在累加器中。64 位 ALU 将 imm32 符号扩展，故 0xffffffff80000000
+ * 可直接编码，而 0x0000000080000000 必须完整装入寄存器。32 位运算可用全部 32 位。 */
+static void alu_rhs(FILE *s, const AtriIRProgram *p, const AtriIRFunction *f, const size_t *slots,
+                    const char *mnemonic, AtriId right) {
+    const AtriIRInst *rhs = &f->instructions[right];
+    bool is_wide = wide(rhs->type);
+    const char *accumulator = is_wide ? "rax" : "eax";
+    if (rhs->kind == ATRI_IR_CONST) {
+        int64_t value = immediate_value(rhs);
+        if (!is_wide || (value >= INT32_MIN && value <= INT32_MAX)) {
+            fprintf(s, "    %s %s, %" PRId64 "\n", mnemonic, accumulator, value);
+            return;
         }
     }
-    return size;
+    load(s, p, f, slots, right, "r10d", "r10");
+    fprintf(s, "    %s %s, %s\n", mnemonic, accumulator, is_wide ? "r10" : "r10d");
+}
+static void offset_address(FILE *s, const AtriIRProgram *p, const AtriIRFunction *f, const size_t *slots,
+                           const char *base, AtriId index, size_t stride, bool subtract) {
+    if (stride == 0) { return; } /* 零大小数组元素共享地址，索引表达式已在之前的 IR 中求值。 */
+    load(s, p, f, slots, index, "r10d", "r10");
+    AtriIRType type = f->instructions[index].type;
+    /* 有符号窄索引在临时值中只扩展到 32 位。先扩展到地址宽度，负索引才能向低地址移动。 */
+    if (atri_integer_is_signed(type) && atri_integer_width(type) <= 32) {
+        fputs("    movsxd r10, r10d\n", s);
+    }
+    if (!subtract && (stride == 2 || stride == 4 || stride == 8)) {
+        fprintf(s, "    lea %s, [%s + r10*%zu]\n", base, base, stride);
+        return;
+    }
+    if (stride > 1) {
+        if ((stride & (stride-1)) == 0) { fprintf(s, "    shl r10, %u\n", stride_shift(stride)); }
+        else { fprintf(s, "    imul r10, %zu\n", stride); }
+    }
+    fprintf(s, "    %s %s, r10\n", subtract ? "sub" : "add", base);
+}
+static size_t call_argument_area(const AtriIRProgram *p, const AtriIRInst *call) {
+    /* Win64 的前四个实参也各占 8 字节 home space，间接返回指针占第一个实参位置。 */
+    size_t arguments = call->argument_count + (size_t)indirect(p, call->type);
+    return (arguments < 4 ? 4 : arguments) * 8;
+}
+static size_t reserve_argument_copy(size_t *end, size_t size) {
+    /* 按值传递的大聚合由调用者建副本，Win64 要求副本起点按 16 字节对齐。 */
+    size_t start = (*end + 15) / 16 * 16;
+    *end = start + size;
+    return start;
 }
 static bool frame_layout(const AtriIRProgram *p, const AtriIRFunction *f, size_t *slots, size_t *frame,
                           AtriDiagnostic *d) {
-    size_t outgoing = outgoing_size(p, f), copies = 0;
+    size_t needed = 0;
     for (size_t i = 0; i < f->instruction_count; ++i) {
         const AtriIRInst *v = &f->instructions[i];
         if (v->kind != ATRI_IR_CALL) { continue; }
         if (v->argument_count > 256) { *d = (AtriDiagnostic){v->span, "x64 prototype supports at most 256 call arguments"}; return false; }
-        size_t bytes = 0;
+        size_t bytes = call_argument_area(p, v);
         for (size_t a = 0; a < v->argument_count; ++a) {
             AtriIRType type = f->instructions[f->arguments[v->first_argument+a]].type;
-            if (indirect(p, type)) { bytes += (atri_ir_type_size(p, type)+15)/16*16; }
+            if (indirect(p, type)) { reserve_argument_copy(&bytes, atri_ir_type_size(p, type)); }
         }
-        if (bytes > copies) { copies = bytes; }
+        /* 函数内各次调用复用同一段栈空间，取单次调用的实参区与副本总长的最大值。 */
+        if (bytes > needed) { needed = bytes; }
     }
-    size_t needed = copies ? (outgoing+15)/16*16+copies : outgoing;
     if (indirect(p, f->return_type)) {
         needed = (needed+7)/8*8; slots[f->instruction_count] = needed; needed += 8;
     }
@@ -122,6 +162,74 @@ static bool frame_layout(const AtriIRProgram *p, const AtriIRFunction *f, size_t
     /* 大帧需要栈探测；当前未生成该代码，因此不能仅增大这里的上限。 */
     if (*frame >= 4096) { *d = (AtriDiagnostic){f->name, "x64 prototype requires a stack frame smaller than 4096 bytes"}; return false; }
     return true;
+}
+static AtriId fallthrough_block(const AtriIRFunction *f, size_t terminator) {
+    size_t next = terminator + 1;
+    /* Verifier 只允许终结指令与下一个 LABEL 之间出现 NOP。块 ID 不代表输出顺序。 */
+    while (next < f->instruction_count && f->instructions[next].kind == ATRI_IR_NOP) { ++next; }
+    return next < f->instruction_count ? (AtriId)f->instructions[next].immediate : ATRI_NONE;
+}
+static bool needs_entry_label(const AtriIRFunction *f) {
+    if (f->block_count > 1) { return true; }
+    /* 单块函数也可能以回到自身的边结尾。Verifier 保证尾部 NOP 之前有终结指令。 */
+    size_t end = f->instruction_count;
+    while (f->instructions[end-1].kind == ATRI_IR_NOP) { --end; }
+    AtriIRKind terminator = f->instructions[end-1].kind;
+    return terminator == ATRI_IR_JUMP || terminator == ATRI_IR_BRANCH;
+}
+static const char *const registers[] = {"ecx", "edx", "r8d", "r9d"};
+static const char *const wide_registers[] = {"rcx", "rdx", "r8", "r9"};
+
+static void emit_parameters(FILE *s, const AtriIRProgram *p, const AtriIRFunction *f,
+                            const size_t *slots, size_t frame) {
+    static const char *const byte_registers[] = {"cl", "dl", "r8b", "r9b"};
+    static const char *const short_registers[] = {"cx", "dx", "r8w", "r9w"};
+    bool hidden = indirect(p, f->return_type);
+    if (hidden) { fprintf(s, "    mov QWORD PTR [rsp + %zu], rcx\n", slots[f->instruction_count]); }
+    if (f->parameter_count == 0) { return; }
+    /* PARAM 取本次调用传入的值。Verifier 限定它只能在入口块，但也允许回边跳到块 0。
+     * 在块标签前一次性保存全部参数，避免函数体的调用、除法或移位改写实参寄存器后重读。 */
+    for (size_t i = 0; i < f->instruction_count; ++i) {
+        const AtriIRInst *v = &f->instructions[i];
+        if (v->kind == ATRI_IR_LABEL) { break; }
+        if (v->kind != ATRI_IR_PARAM) { continue; }
+        /* 隐藏返回指针占第一个实参位置，第五个 ABI 实参位于入口 RSP + 40。 */
+        size_t position = (size_t)v->immediate + (size_t)hidden;
+        size_t incoming = frame + 40 + (position >= 4 ? position-4 : 0)*8;
+        size_t width = atri_ir_type_size(p, v->type);
+        if (atri_ir_is_aggregate(v->type)) {
+            if (indirect(p, v->type)) {
+                if (position < 4) { fprintf(s, "    mov r11, %s\n", wide_registers[position]); }
+                else { fprintf(s, "    mov r11, QWORD PTR [rsp + %zu]\n", incoming); }
+                fprintf(s, "    lea rax, [rsp + %zu]\n", slots[i]);
+                copy_object(s, width);
+            } else if (width != 0) {
+                if (position < 4) { fprintf(s, "    mov rax, %s\n", wide_registers[position]); }
+                else { fprintf(s, "    mov rax, QWORD PTR [rsp + %zu]\n", incoming); }
+                const char *reg = width == 8 ? "rax" : width == 4 ? "eax" : width == 2 ? "ax" : "al";
+                fprintf(s, "    mov %s PTR [rsp + %zu], %s\n", width_word(width), slots[i], reg);
+            }
+        } else if (width < 4) {
+            const char *extend = atri_integer_is_signed(v->type) ? "movsx" : "movzx";
+            if (position < 4) { fprintf(s, "    %s eax, %s\n", extend, width == 1 ? byte_registers[position] : short_registers[position]); }
+            else { fprintf(s, "    %s eax, %s PTR [rsp + %zu]\n", extend, width_word(width), incoming); }
+            fprintf(s, "    mov DWORD PTR [rsp + %zu], eax\n", slots[i]);
+        } else if (position < 4) {
+            fprintf(s, "    mov %s PTR [rsp + %zu], %s\n", word(v->type), slots[i],
+                    wide(v->type) ? wide_registers[position] : registers[position]);
+        } else {
+            const char *reg = wide(v->type) ? "rax" : "eax";
+            fprintf(s, "    mov %s, %s PTR [rsp + %zu]\n    mov %s PTR [rsp + %zu], %s\n",
+                    reg, word(v->type), incoming, word(v->type), slots[i], reg);
+        }
+    }
+}
+static void emit_bytes(FILE *s, const unsigned char *bytes, size_t length) {
+    for (size_t i = 0; i < length; ++i) {
+        fputs(i % 16 == 0 ? "    .byte " : ", ", s);
+        fprintf(s, "%u", (unsigned)bytes[i]);
+        if (i % 16 == 15 || i+1 == length) { fputc('\n', s); }
+    }
 }
 /* reachable 为 NULL 时保留全部定义，供没有 main 的库源码使用。 */
 static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *p,
@@ -168,11 +276,7 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
                 fprintf(s, ".balign %zu\n.Latri_global_%zu:\n", atri_ir_type_align(p, g->type), i);
                 /* 零大小对象保留一个地址锚点，不改变语言可见的 sizeof。 */
                 if (!g->data_size) { fputs("    .byte 0\n", s); }
-                for (size_t b = 0; b < g->data_size; ++b) {
-                    if (b % 16 == 0) { fputs("    .byte ", s); }
-                    fprintf(s, "%s%u", b % 16 ? ", " : "", (unsigned)g->data[b]);
-                    if (b % 16 == 15 || b+1 == g->data_size) { fputc('\n', s); }
-                }
+                else { emit_bytes(s, g->data, g->data_size); }
                 continue;
             }
             unsigned width = (unsigned)atri_ir_type_size(p, g->type);
@@ -185,22 +289,10 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
         fputs(".section .rdata,\"dr\"\n", s);
         for (size_t n = 0; n < p->string_count; ++n) {
             fprintf(s, ".Latri_string_%zu:\n", n);
-            for (size_t b = 0; b <= p->strings[n].length; ++b) {
-                if (b % 16 == 0) {
-                    fputs("    .byte ", s);
-                }
-                fprintf(s, "%s%u", b % 16 ? ", " : "", (unsigned)p->strings[n].bytes[b]);
-                if (b % 16 == 15 || b == p->strings[n].length) {
-                    fputc('\n', s);
-                }
-            }
+            emit_bytes(s, p->strings[n].bytes, p->strings[n].length+1);
         }
         fputs(".text\n", s);
     }
-    const char *registers[] = {"ecx", "edx", "r8d", "r9d"};
-    const char *wide_registers[] = {"rcx", "rdx", "r8", "r9"};
-    const char *byte_registers[] = {"cl", "dl", "r8b", "r9b"};
-    const char *short_registers[] = {"cx", "dx", "r8w", "r9w"};
     for (size_t n = 0; n < p->function_count; ++n) {
         if (reachable != NULL && !reachable[n]) {
             continue;
@@ -218,17 +310,29 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
         fputc('\n', s); symbol(s, source, p, n); fputs(":\n", s);
         if (frame != 0) fprintf(s, "    sub rsp, %zu\n    .seh_stackalloc %zu\n", frame, frame);
         fputs("    .seh_endprologue\n", s);
-        if (indirect(p, f->return_type)) { fprintf(s, "    mov QWORD PTR [rsp + %zu], rcx\n", slots[f->instruction_count]); }
-        if (f->block_count > 1) fprintf(s, ".Latri_%zu_0:\n", n);
+        emit_parameters(s, p, f, slots, frame);
+        if (needs_entry_label(f)) { fprintf(s, ".Latri_%zu_0:\n", n); }
         for (size_t i = 0; i < f->instruction_count; ++i) {
             const AtriIRInst *v = &f->instructions[i];
             switch (v->kind) {
-                case ATRI_IR_NOP: case ATRI_IR_CONST: case ATRI_IR_FIELD: case ATRI_IR_LOCAL: case ATRI_IR_ADDRESS: case ATRI_IR_STRING: continue;
+                case ATRI_IR_NOP: case ATRI_IR_CONST: case ATRI_IR_FIELD: case ATRI_IR_LOCAL: case ATRI_IR_ADDRESS: case ATRI_IR_STRING: case ATRI_IR_PARAM: continue;
                 case ATRI_IR_LABEL: fprintf(s, ".Latri_%zu_%" PRIu64 ":\n", n, v->immediate); continue;
-                case ATRI_IR_JUMP: fprintf(s, "    jmp .Latri_%zu_%zu\n", n, v->target); continue;
-                case ATRI_IR_BRANCH:
-                    load(s, p, f, slots, v->left, "eax", "rax");
-                    fprintf(s, "    test eax, eax\n    jnz .Latri_%zu_%zu\n    jmp .Latri_%zu_%zu\n", n, v->target, n, v->alternative); continue;
+                case ATRI_IR_JUMP: case ATRI_IR_BRANCH: {
+                    AtriId next = fallthrough_block(f, i);
+                    AtriId target = v->target;
+                    if (v->kind == ATRI_IR_BRANCH && target != v->alternative) {
+                        load(s, p, f, slots, v->left, "eax", "rax");
+                        fputs("    test eax, eax\n", s);
+                        if (target == next) {
+                            fprintf(s, "    jz .Latri_%zu_%zu\n", n, v->alternative);
+                            continue;
+                        }
+                        fprintf(s, "    jnz .Latri_%zu_%zu\n", n, target);
+                        target = v->alternative;
+                    }
+                    if (target != next) { fprintf(s, "    jmp .Latri_%zu_%zu\n", n, target); }
+                    continue;
+                }
                 case ATRI_IR_UNREACHABLE: fputs("    ud2\n", s); continue;
                 case ATRI_IR_ZERO: {
                     size_t size = atri_ir_type_size(p, v->type);
@@ -238,43 +342,11 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
                     }
                     continue;
                 }
-                case ATRI_IR_PARAM: {
-                    /* 大结构体返回占用首个实参位置；第 5 个 ABI 实参在入口 RSP+40。 */
-                    size_t position = (size_t)v->immediate + (size_t)indirect(p, f->return_type);
-                    size_t incoming = frame+40+(position >= 4 ? position-4 : 0)*8;
-                    if (atri_ir_is_aggregate(v->type)) {
-                        size_t size = atri_ir_type_size(p, v->type);
-                        if (indirect(p, v->type)) {
-                            if (position < 4) { fprintf(s, "    mov r11, %s\n", wide_registers[position]); }
-                            else { fprintf(s, "    mov r11, QWORD PTR [rsp + %zu]\n", incoming); }
-                            fprintf(s, "    lea rax, [rsp + %zu]\n", slots[i]); copy_object(s, size);
-                        } else if (size) {
-                            if (position < 4) { fprintf(s, "    mov rax, %s\n", wide_registers[position]); }
-                            else { fprintf(s, "    mov rax, QWORD PTR [rsp + %zu]\n", incoming); }
-                            fprintf(s, "    mov %s PTR [rsp + %zu], %s\n", width_word(size), slots[i], size == 8 ? "rax" : size == 4 ? "eax" : size == 2 ? "ax" : "al");
-                        }
-                        continue;
-                    }
-                    size_t width = atri_ir_type_size(p, v->type);
-                    if (width < 4) {
-                        const char *extend = atri_integer_is_signed(v->type) ? "movsx" : "movzx";
-                        if (position < 4) { fprintf(s, "    %s eax, %s\n", extend, width == 1 ? byte_registers[position] : short_registers[position]); }
-                        else { fprintf(s, "    %s eax, %s PTR [rsp + %zu]\n", extend, width_word(width), incoming); }
-                        fprintf(s, "    mov DWORD PTR [rsp + %zu], eax\n", slots[i]); continue;
-                    }
-                    const char *size = wide(v->type) ? "QWORD" : "DWORD";
-                    const char *reg = wide(v->type) ? "rax" : "eax";
-                    if (position < 4) { fprintf(s, "    mov %s PTR [rsp + %zu], %s\n", size, slots[i], wide(v->type) ? wide_registers[position] : registers[position]); }
-                    else { fprintf(s, "    mov %s, %s PTR [rsp + %zu]\n    mov %s PTR [rsp + %zu], %s\n", reg, size, incoming, size, slots[i], reg); }
-                    continue;
-                }
                 case ATRI_IR_INDEX: {
                     /* 位置在本指令执行时固定，后续地址使用不会重新计算或覆盖调用实参寄存器。 */
                     object_address(s, p, f, slots, v->left, "r11");
-                    load(s, p, f, slots, v->right, "r10d", "r10");
-                    if (atri_integer_is_signed(f->instructions[v->right].type) && atri_integer_width(f->instructions[v->right].type) <= 32) { fputs("    movsxd r10, r10d\n", s); }
-                    fprintf(s, "    imul r10, %zu\n    add r11, r10\n    mov QWORD PTR [rsp + %zu], r11\n",
-                        atri_ir_type_size(p, v->type), slots[i]);
+                    offset_address(s, p, f, slots, "r11", v->right, atri_ir_type_size(p, v->type), false);
+                    fprintf(s, "    mov QWORD PTR [rsp + %zu], r11\n", slots[i]);
                     continue;
                 }
                 case ATRI_IR_LOAD:
@@ -304,41 +376,45 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
                     load(s, p, f, slots, v->left, "eax", "rax");
                     fputs(v->op == ATRI_NOT ? "    xor eax, 1\n" : v->op == ATRI_BIT_NOT ? (wide(v->type) ? "    not rax\n" : "    not eax\n") : wide(v->type) ? "    neg rax\n" : "    neg eax\n", s); break;
                 case ATRI_IR_COMPARE: {
-                    load(s, p, f, slots, v->left, "eax", "rax"); load(s, p, f, slots, v->right, "r10d", "r10");
-                    bool is_wide = wide(f->instructions[v->left].type);
-                    fputs(is_wide ? "    cmp rax, r10\n" : "    cmp eax, r10d\n", s);
+                    load(s, p, f, slots, v->left, "eax", "rax");
+                    alu_rhs(s, p, f, slots, "cmp", v->right);
                     static const char *conditions[] = {"e", "ne", "l", "le", "g", "ge"};
                     fprintf(s, "    set%s al\n    movzx eax, al\n", !atri_integer_is_signed(f->instructions[v->left].type) ?
                         (const char *[]){"e", "ne", "b", "be", "a", "ae"}[v->op-ATRI_EQ] : conditions[v->op - ATRI_EQ]); break;
                 }
-                case ATRI_IR_BINARY:
-                    load(s, p, f, slots, v->left, "eax", "rax"); load(s, p, f, slots, v->right, "r10d", "r10");
-                    switch (v->op) {
-                        case ATRI_ADD: fputs(wide(v->type) ? "    add rax, r10\n" : "    add eax, r10d\n", s); break;
-                        case ATRI_SUB: fputs(wide(v->type) ? "    sub rax, r10\n" : "    sub eax, r10d\n", s); break;
-                        case ATRI_MUL: fputs(wide(v->type) ? "    imul rax, r10\n" : "    imul eax, r10d\n", s); break;
-                        case ATRI_BIT_AND: fputs(wide(v->type) ? "    and rax, r10\n" : "    and eax, r10d\n", s); break;
-                        case ATRI_BIT_OR: fputs(wide(v->type) ? "    or rax, r10\n" : "    or eax, r10d\n", s); break;
-                        case ATRI_BIT_XOR: fputs(wide(v->type) ? "    xor rax, r10\n" : "    xor eax, r10d\n", s); break;
-                        case ATRI_SHL: case ATRI_SHR:
-                            fputs("    mov ecx, r10d\n", s);
-                            fprintf(s, "    %s %s, cl\n", v->op == ATRI_SHL ? "shl" : atri_integer_is_signed(v->type) ? "sar" : "shr", wide(v->type) ? "rax" : "eax"); break;
-                        case ATRI_DIV: case ATRI_REM:
-                            fputs(!atri_integer_is_signed(v->type) ? (wide(v->type) ? "    xor edx, edx\n    div r10\n" : "    xor edx, edx\n    div r10d\n") : wide(v->type) ? "    cqo\n    idiv r10\n" : "    cdq\n    idiv r10d\n", s);
-                            if (v->op == ATRI_REM) fputs(wide(v->type) ? "    mov rax, rdx\n" : "    mov eax, edx\n", s);
-                            break;
-                        default: break;
+                case ATRI_IR_BINARY: {
+                    load(s, p, f, slots, v->left, "eax", "rax");
+                    bool is_wide = wide(v->type);
+                    const char *accumulator = is_wide ? "rax" : "eax";
+                    if (v->op == ATRI_DIV || v->op == ATRI_REM) {
+                        load(s, p, f, slots, v->right, "r10d", "r10");
+                        /* div/idiv 使用双倍宽度的被除数。高半部按源类型清零或填符号位。 */
+                        bool is_signed = atri_integer_is_signed(v->type);
+                        fputs(is_signed ? (is_wide ? "    cqo\n" : "    cdq\n") : "    xor edx, edx\n", s);
+                        fprintf(s, "    %s %s\n", is_signed ? "idiv" : "div", is_wide ? "r10" : "r10d");
+                        if (v->op == ATRI_REM) { fprintf(s, "    mov %s, %s\n", accumulator, is_wide ? "rdx" : "edx"); }
+                    } else if (v->op == ATRI_SHL || v->op == ATRI_SHR) {
+                        const char *op = v->op == ATRI_SHL ? "shl" : atri_integer_is_signed(v->type) ? "sar" : "shr";
+                        const AtriIRInst *count = &f->instructions[v->right];
+                        if (count->kind == ATRI_IR_CONST) {
+                            fprintf(s, "    %s %s, %u\n", op, accumulator, (unsigned)(uint8_t)count->immediate);
+                        } else {
+                            load(s, p, f, slots, v->right, "ecx", "rcx");
+                            fprintf(s, "    %s %s, cl\n", op, accumulator);
+                        }
+                    } else {
+                        static const char *const mnemonic[] = {
+                            [ATRI_ADD] = "add", [ATRI_SUB] = "sub", [ATRI_MUL] = "imul",
+                            [ATRI_BIT_AND] = "and", [ATRI_BIT_OR] = "or", [ATRI_BIT_XOR] = "xor"
+                        };
+                        alu_rhs(s, p, f, slots, mnemonic[v->op], v->right);
                     }
                     break;
+                }
                 case ATRI_IR_PTR_OFFSET: {
                     load(s, p, f, slots, v->left, "eax", "rax");
-                    load(s, p, f, slots, v->right, "r10d", "r10");
-                    /* 负偏移先符号扩展再缩放，避免在 32 位中先乘 4 而错误环绕。 */
-                    if (f->instructions[v->right].type == ATRI_IR_I32) fputs("    movsxd r10, r10d\n", s);
                     size_t stride = atri_ir_type_size(p, atri_ir_pointee(v->type));
-                    if (stride > 1 && !(stride & (stride-1))) { fprintf(s, "    shl r10, %u\n", stride_shift(stride)); }
-                    else if (stride > 1) { fprintf(s, "    imul r10, %zu\n", stride); }
-                    fputs(v->op == ATRI_ADD ? "    add rax, r10\n" : "    sub rax, r10\n", s);
+                    offset_address(s, p, f, slots, "rax", v->right, stride, v->op == ATRI_SUB);
                     break;
                 }
                 case ATRI_IR_PTR_DIFF:
@@ -353,15 +429,18 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
                     }
                     break;
                 case ATRI_IR_CALL: {
-                    size_t hidden = (size_t)indirect(p, v->type), copy_base = (outgoing_size(p, f)+15)/16*16;
+                    size_t hidden = (size_t)indirect(p, v->type);
+                    size_t copy_end = call_argument_area(p, v);
                     size_t argument_copies[256];
                     for (size_t a = 0; a < v->argument_count; ++a) {
                         AtriId argument = f->arguments[v->first_argument+a];
                         AtriIRType type = f->instructions[argument].type;
-                        argument_copies[a] = copy_base;
                         if (indirect(p, type)) {
-                            object_address(s, p, f, slots, argument, "r11"); fprintf(s, "    lea rax, [rsp + %zu]\n", copy_base);
-                            copy_object(s, atri_ir_type_size(p, type)); copy_base += (atri_ir_type_size(p, type)+15)/16*16;
+                            size_t size = atri_ir_type_size(p, type);
+                            argument_copies[a] = reserve_argument_copy(&copy_end, size);
+                            object_address(s, p, f, slots, argument, "r11");
+                            fprintf(s, "    lea rax, [rsp + %zu]\n", argument_copies[a]);
+                            copy_object(s, size);
                         }
                     }
                     /* 先写栈参数，再装寄存器；副本复制已完成，不会破坏先装入的寄存器实参。 */

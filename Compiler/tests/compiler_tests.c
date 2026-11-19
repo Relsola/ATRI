@@ -47,6 +47,42 @@ static void arithmetic(void) {
     EXPECT_OPT_ERROR("fn f()->i32{return -2147483648/-1;}", "INT_MIN");
     EXPECT_OPT_ERROR("fn f(x:i32)->i32{return x/0;}", "by zero");
 }
+static void symbol_table_lifetime(void) {
+    const char code[] = "fn f()->i32{return g;}g:i32:=7;";
+    AtriSource source = {"single file", code, sizeof(code)-1};
+    AtriProgram ast;
+    AtriIRProgram ir;
+    AtriDiagnostic diagnostic;
+    CHECK(atri_parse(source, &ast, &diagnostic));
+    CHECK(!ast.symbols_ready);
+    CHECK(atri_lower(source, &ast, &ir, &diagnostic));
+    CHECK(ast.symbols_ready && ast.symbol_count == 2);
+    const AtriModuleSymbol *symbols = ast.symbols;
+    atri_ir_destroy(&ir);
+    CHECK(atri_lower(source, &ast, &ir, &diagnostic));
+    CHECK(ast.symbols == symbols);
+    atri_ir_destroy(&ir);
+    atri_program_destroy(&ast);
+
+    const char duplicate[] = "fn g()->i32{return 0;}g:i32:=1;";
+    source = (AtriSource){"duplicate", duplicate, sizeof(duplicate)-1};
+    CHECK(atri_parse(source, &ast, &diagnostic));
+    /* 重试必须再次给出重名诊断；失败时若发布了半张表，这里会误当成已经检查。 */
+    for (size_t attempt = 0; attempt < 2; ++attempt) {
+        CHECK(!atri_lower(source, &ast, &ir, &diagnostic));
+        CHECK(diagnostic.message && strstr(diagnostic.message, "duplicate"));
+        CHECK(!ast.symbols_ready && ast.symbols == NULL && ast.symbol_count == 0);
+    }
+    atri_program_destroy(&ast);
+
+    source = (AtriSource){"empty", "", 0};
+    CHECK(atri_parse(source, &ast, &diagnostic));
+    CHECK(atri_lower(source, &ast, &ir, &diagnostic));
+    CHECK(ast.symbols_ready && ast.symbol_count == 0);
+    atri_ir_destroy(&ir);
+    atri_program_destroy(&ast);
+    EXPECT_COMPILE_ERROR("import \"other.ar\";", "imports require the module loader");
+}
 static void names_and_types(void) {
     EXPECT_COMPILE_ERROR("fn f()->i32{x: i32 :=1;x=2;return x;}", "cannot assign");
     EXPECT_COMPILE_ERROR("fn f(x:i32)->i32{x=2;return x;}", "cannot assign");
@@ -619,6 +655,7 @@ int main(void) {
     conversions_and_layout();
     arrays_and_run();
     arithmetic();
+    symbol_table_lifetime();
     names_and_types();
     compile_time_constants();
     pointers();

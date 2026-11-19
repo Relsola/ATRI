@@ -26,22 +26,34 @@ function(expect_stdout executable expected)
     endif()
 endfunction()
 
-function(expect_direct_return assembly expected)
+function(expect_function_assembly assembly symbol pattern)
     file(READ "${assembly}" text)
-    string(FIND "${text}" "main:" start)
+    string(FIND "${text}" "\n${symbol}:" start)
     if(start LESS 0)
-        message(FATAL_ERROR "${assembly}: main was not emitted")
+        message(FATAL_ERROR "${assembly}: ${symbol} was not emitted")
     endif()
-    # 只截取 main 的函数体，避免在后续辅助函数中找到相同指令而误判优化成功。
+    # 相同指令也可能出现在其他函数，只匹配这个符号到自己的 .seh_endproc。
     string(SUBSTRING "${text}" ${start} -1 body)
     string(FIND "${body}" ".seh_endproc" end)
     if(end LESS 0)
-        message(FATAL_ERROR "${assembly}: main has no end marker")
+        message(FATAL_ERROR "${assembly}: ${symbol} has no end marker")
     endif()
     string(SUBSTRING "${body}" 0 ${end} body)
-    if(NOT body MATCHES "main:[\r\n ]+\\.seh_endprologue[\r\n ]+mov eax, ${expected}[\r\n ]+ret")
-        message(FATAL_ERROR "${assembly} / main\nExpected: direct return ${expected}\nActual assembly:\n${body}")
+    if(NOT body MATCHES "${pattern}")
+        message(FATAL_ERROR "${assembly} / ${symbol}\nExpected pattern: ${pattern}\nActual assembly:\n${body}")
     endif()
+endfunction()
+
+function(expect_direct_return assembly expected)
+    expect_function_assembly("${assembly}" main "main:[\r\n ]+\\.seh_endprologue[\r\n ]+mov eax, ${expected}[\r\n ]+ret")
+endfunction()
+
+function(expect_library_assembly harness name pattern)
+    file(READ "${OUTPUT_DIR}/${harness}_bindings.h" bindings)
+    if(NOT bindings MATCHES "#define atri_test_${name} (atri_fn_[0-9]+)[\r\n]")
+        message(FATAL_ERROR "${harness}: missing generated binding for ${name}")
+    endif()
+    expect_function_assembly("${OUTPUT_DIR}/${harness}-${level}.s" "${CMAKE_MATCH_1}" "${pattern}")
 endfunction()
 
 function(expect_function_count assembly expected)
@@ -154,6 +166,14 @@ foreach(level O0 O1)
     run_library("tests/cases/control_flow.txt" "control_flow_harness.c")
     run_library("tests/cases/c_abi.ar" "c_abi_harness.c")
     run_library("tests/cases/structs/abi.ar" "struct_harness.c")
+
+    # choose 的条件跳转后直接落入下一块；add32 用寻址比例 4 合并乘法和加法。
+    expect_library_assembly(control_flow_harness choose
+        "j(z|nz|e|ne|l|le|g|ge) [^\r\n]+[\r\n]+\\.Latri_[0-9_]+:")
+    expect_library_assembly(pointer_arithmetic_harness add32
+        "lea [^,\r\n]+, \\[[^\r\n]*\\* *4\\]")
+    expect_library_assembly(basic_types_harness xor_bits31_to_63
+        "xor [^,\r\n]+, -2147483648[\r\n]")
 
     # := 必须在编译期求值，关闭可选内联后也不能退回运行期计算。
     expect_direct_return("${OUTPUT_DIR}/constants-${level}.s" 3)

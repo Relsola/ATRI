@@ -63,12 +63,35 @@ static void preserve_observable_behavior(TestMode mode) {
     test_destroy(&test);
 }
 
+static void preserve_entry_backedge(TestMode mode, AtriIRKind terminator) {
+    Compilation test = test_compile("single-block loop",
+        "fn spin(flag: bool) -> bool { return flag; }"
+        "fn caller(flag: bool) -> bool { return spin(flag); }", TEST_NO_OPT);
+    AtriIRFunction *spin = test_function(&test.after, "spin");
+    CHECK(spin->block_count == 1);
+    /* 源码循环通常有独立的循环体块。直接构造跳回入口的合法 IR，覆盖单块也有回边的情形。 */
+    AtriId end = test_instruction(&test.after, "spin", ATRI_IR_RETURN, 0);
+    spin->instructions[end].kind = terminator;
+    spin->instructions[end].target = 0;
+    spin->instructions[end].alternative = 0;
+    EXPECT_VALID_IR(test.after);
+
+    AtriDiagnostic diagnostic;
+    CHECK(atri_optimize(&test.after.program, mode == TEST_O1, &diagnostic));
+    EXPECT_VALID_IR(test.after);
+    EXPECT_OPERATIONS(test.after, "spin", terminator, 1);
+    EXPECT_CALL(test.after, "caller", "spin");
+    test_destroy(&test);
+}
+
 int main(void) {
     for (TestMode mode = TEST_O0; mode <= TEST_O1; ++mode) {
         inline_add(mode);
         constant_call(mode);
         dead_code(mode);
         preserve_observable_behavior(mode);
+        preserve_entry_backedge(mode, ATRI_IR_JUMP);
+        preserve_entry_backedge(mode, ATRI_IR_BRANCH);
     }
     propagation_and_call_chain();
     EXPECT_OPT_ERROR(

@@ -103,5 +103,9 @@ int main(void) {
     EXPECT_EQ(0, atri_test_byte_literal_index());
     const uint8_t fixed_hex[] = {'A', 'B', 0, '1', '2', 0};
     EXPECT_TRUE(memcmp(fixed_hex, atri_test_fixed_hex_literal(), sizeof(fixed_hex)) == 0);
+    /* 两个掩码的低 32 位相同，只有第二个能用 x64 符号扩展的 imm32 表示。 */
+    const uint64_t bits = UINT64_C(0x1234567800000001);
+    EXPECT_TRUE(atri_test_xor_bit31(bits) == UINT64_C(0x1234567880000001));
+    EXPECT_TRUE(atri_test_xor_bits31_to_63(bits) == UINT64_C(0xedcba98780000001));
     return 0;
 }

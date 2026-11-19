@@ -49,19 +49,34 @@ static bool emit_fold(const AtriIRProgram *p, AtriIRFunction *out, AtriIRInst in
     }
     return atri_ir_append(out, inst, id) || diagnostic(d, inst.span, "out of memory during optimization");
 }
-static bool is_leaf(const AtriIRFunction *f) {
-    if (f->external_c || f->return_type == ATRI_IR_VOID || f->block_count > 1) {
+static bool can_optimize(const AtriIRFunction *f, bool for_inlining) {
+    /* 跨分支折叠可能在实际未执行的路径上触发除零等诊断。 */
+    if (f->external_c || f->block_count > 1 || f->return_type >= ATRI_IR_STRUCT) {
         return false;
     }
-    if (f->return_type >= ATRI_IR_STRUCT) { return false; }
+    if (for_inlining && (f->return_type == ATRI_IR_VOID || f->instruction_count > 4096)) {
+        return false;
+    }
     size_t active = 0;
     for (size_t i = 0; i < f->instruction_count; ++i) {
-        AtriIRKind kind = f->instructions[i].kind;
-        if (f->instructions[i].type >= ATRI_IR_STRUCT || kind == ATRI_IR_FIELD || kind == ATRI_IR_INDEX) { return false; }
-        if (kind == ATRI_IR_CALL || kind == ATRI_IR_LOCAL || kind == ATRI_IR_LOAD || kind == ATRI_IR_STORE) return false;
-        if (f->instructions[i].kind != ATRI_IR_NOP) ++active;
+        const AtriIRInst *inst = &f->instructions[i];
+        if (inst->type >= ATRI_IR_STRUCT || inst->kind == ATRI_IR_FIELD || inst->kind == ATRI_IR_INDEX) {
+            return false;
+        }
+        /* 单块也能跳回入口。直线 DCE 会删掉这个跳转，内联也找不到 return 来替换调用结果。 */
+        if (inst->kind == ATRI_IR_JUMP || inst->kind == ATRI_IR_BRANCH) {
+            return false;
+        }
+        if (!for_inlining || inst->kind == ATRI_IR_NOP) {
+            continue;
+        }
+        ++active;
+        if (active > 64 || inst->kind == ATRI_IR_CALL || inst->kind == ATRI_IR_LOCAL ||
+            inst->kind == ATRI_IR_LOAD || inst->kind == ATRI_IR_STORE) {
+            return false;
+        }
     }
-    return active <= 64 && f->instruction_count <= 4096;
+    return true;
 }
 static bool inline_leaf(const AtriIRProgram *p, AtriIRFunction *out, const AtriIRFunction *callee,
                         const AtriId *arguments, AtriId *value, AtriDiagnostic *d) {
@@ -111,12 +126,7 @@ bool atri_optimize(AtriIRProgram *p, bool inline_functions, AtriDiagnostic *d) {
         bool changed = false;
         for (size_t n = 0; n < p->function_count; ++n) {
             AtriIRFunction *old = &p->functions[n];
-            /* 上面的折叠/DCE 只适用于单块，不能跨分支套用：未执行路径中的非法运算也不能提前求值。 */
-            bool aggregate = old->return_type >= ATRI_IR_STRUCT;
-            for (size_t i = 0; i < old->instruction_count; ++i) {
-                if (old->instructions[i].type >= ATRI_IR_STRUCT || old->instructions[i].kind == ATRI_IR_FIELD || old->instructions[i].kind == ATRI_IR_INDEX) { aggregate = true; }
-            }
-            if (old->external_c || old->block_count > 1 || aggregate) {
+            if (!can_optimize(old, false)) {
                 continue;
             }
             AtriIRFunction out = {.name = old->name, .module = old->module, .parameter_count = old->parameter_count,
@@ -137,7 +147,7 @@ bool atri_optimize(AtriIRProgram *p, bool inline_functions, AtriDiagnostic *d) {
                     AtriId *args = inst.argument_count == 0 ? NULL : malloc(inst.argument_count * sizeof(*args));
                     if (inst.argument_count != 0 && args == NULL) { ok = diagnostic(d, inst.span, "out of memory"); break; }
                     for (size_t a = 0; a < inst.argument_count; ++a) args[a] = map[old->arguments[inst.first_argument + a]];
-                    if (inline_functions && inst.callee != n && out.instruction_count < 4096 && is_leaf(&p->functions[inst.callee])) {
+                    if (inline_functions && inst.callee != n && out.instruction_count < 4096 && can_optimize(&p->functions[inst.callee], true)) {
                         ok = inline_leaf(p, &out, &p->functions[inst.callee], args, &map[i], d);
                         changed = true;
                     } else {

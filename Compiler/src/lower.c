@@ -1116,13 +1116,13 @@ static bool c_value_compatible(const AtriIRProgram *p, AtriIRType type) {
     }
     return true;
 }
-bool atri_lower(AtriSource source, const AtriProgram *ast, AtriIRProgram *out, AtriDiagnostic *d) {
+bool atri_lower(AtriSource source, AtriProgram *ast, AtriIRProgram *out, AtriDiagnostic *d) {
     *out = (AtriIRProgram){0}; *d = (AtriDiagnostic){0};
     AtriIRProgram ir = {.function_count = ast->function_count + ast->global_count + ast->field_count + ast->run_count, .global_count = ast->global_count};
     ir.functions = calloc(ir.function_count ? ir.function_count : 1, sizeof(*ir.functions));
     if (!ir.functions) { *d = (AtriDiagnostic){{0,0}, "out of memory"}; return false; }
     Lower l = {.source = source, .ast = ast, .ir = &ir, .diagnostic = d, .static_steps = 100000};
-    if (!atri_validate_modules(source, ast, d)) { goto failure; }
+    if (!atri_prepare_symbols(source, ast, d)) { goto failure; }
     if (!atri_layout_structs(source, ast, &ir, d)) { goto failure; }
     ir.globals = calloc(ast->global_count ? ast->global_count : 1, sizeof(*ir.globals));
     if (!ir.globals) { error(&l, (AtriSpan){0}, "out of memory"); goto failure; }

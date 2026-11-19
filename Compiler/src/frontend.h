@@ -96,11 +96,14 @@ typedef struct { AtriSpan span; AtriId expression, body; bool through; } AtriCas
 typedef struct { AtriSpan name, path; AtriId target; } AtriImport;
 typedef struct { AtriStatement declaration; bool exported; } AtriGlobal;
 typedef struct { char *path; AtriSpan span; } AtriModule;
+typedef enum {
+    ATRI_SYMBOL_FUNCTION, ATRI_SYMBOL_GLOBAL, ATRI_SYMBOL_MODULE, ATRI_SYMBOL_STRUCT, ATRI_SYMBOL_ENUM
+} AtriSymbolKind;
 typedef struct {
     const char *text;
     size_t length;
     AtriId owner, target;
-    unsigned kind; /* 0 函数，1 全局，2 模块绑定，3 struct/union，4 enum。 */
+    AtriSymbolKind kind;
     bool exported;
     AtriSpan span;
 } AtriModuleSymbol;
@@ -125,6 +128,7 @@ typedef struct {
     size_t initializer_count;
     AtriModuleSymbol *symbols;
     size_t symbol_count;
+    bool symbols_ready;
     AtriImport *imports;
     size_t import_count;
     AtriGlobal *globals;
@@ -156,8 +160,10 @@ bool atri_parse(AtriSource source, AtriProgram *output,
                 AtriDiagnostic *diagnostic);
 bool atri_parse_sources(AtriSource source, const AtriModule *modules, size_t count, AtriProgram *program, AtriDiagnostic *diagnostic);
 bool atri_load_program(AtriSource input, AtriSource *source, AtriProgram *program, AtriDiagnostic *diagnostic);
-bool atri_validate_modules(AtriSource source, const AtriProgram *program, AtriDiagnostic *diagnostic);
+/* 成功后 AST 持有有序名称表，表项借用同一份 source 的字节；失败可重试。 */
+bool atri_prepare_symbols(AtriSource source, AtriProgram *program, AtriDiagnostic *diagnostic);
 AtriId atri_module_at(const AtriProgram *program, size_t offset);
+/* 直接查询 AST 中的名称前须完成符号表准备。atri_load_program 和 atri_lower 会代为准备。 */
 AtriId atri_find_declaration(AtriSource source, const AtriProgram *program, size_t offset,
                              AtriSpan name, AtriSpan qualifier, bool *global);
 AtriId atri_find_struct(AtriSource source, const AtriProgram *program, size_t offset, AtriSpan name, AtriSpan qualifier);

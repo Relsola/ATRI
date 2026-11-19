@@ -25,11 +25,24 @@ static bool operand(const Check *c, size_t use, AtriId id, AtriIRType type) {
     return type != ATRI_IR_VOID && available(c, use, id) && atri_ir_has_value(c->f->instructions[id].kind) &&
         c->f->instructions[id].type == type;
 }
+static bool storage_location(AtriIRKind kind) {
+    return kind == ATRI_IR_LOCAL || kind == ATRI_IR_FIELD || kind == ATRI_IR_INDEX;
+}
 static bool location(const Check *c, size_t use, AtriId id, AtriIRType type) {
     if (!available(c, use, id)) return false;
     const AtriIRInst *v = &c->f->instructions[id];
-    return (v->kind == ATRI_IR_LOCAL || v->kind == ATRI_IR_FIELD || v->kind == ATRI_IR_INDEX) ? v->type == type :
-        atri_ir_is_pointer(v->type) && atri_ir_pointee(v->type) == type && operand(c, use, id, v->type);
+    if (storage_location(v->kind)) { return v->type == type; }
+    return atri_ir_has_value(v->kind) && atri_ir_is_pointer(v->type) && atri_ir_pointee(v->type) == type;
+}
+static AtriIRType aggregate_base_type(const Check *c, size_t use, AtriId id) {
+    if (!available(c, use, id)) { return ATRI_IR_INVALID; }
+    const AtriIRInst *base = &c->f->instructions[id];
+    /* 聚合位置本身就有对象地址，按值传入的聚合也有可寻址的快照。
+     * 指针槽的地址却比目标多一层间接寻址，必须先 LOAD 出指针值，再选字段或元素。 */
+    if (atri_ir_is_pointer(base->type)) {
+        return atri_ir_has_value(base->kind) ? atri_ir_pointee(base->type) : ATRI_IR_INVALID;
+    }
+    return storage_location(base->kind) || atri_ir_has_value(base->kind) ? base->type : ATRI_IR_INVALID;
 }
 static bool terminator(AtriIRKind k) {
     return k == ATRI_IR_RETURN || k == ATRI_IR_JUMP || k == ATRI_IR_BRANCH || k == ATRI_IR_UNREACHABLE;
@@ -162,21 +175,15 @@ static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, Atr
             case ATRI_IR_NOP: case ATRI_IR_LABEL: case ATRI_IR_JUMP: case ATRI_IR_UNREACHABLE: break;
             case ATRI_IR_ZERO: valid = atri_ir_is_aggregate(v->type); break;
             case ATRI_IR_INDEX: {
-                AtriIRType input = v->left < i ? f->instructions[v->left].type : ATRI_IR_INVALID;
-                AtriIRType base = atri_ir_is_pointer(input) ? atri_ir_pointee(input) : input;
-                valid = available(&c, i, v->left) && atri_ir_is_array(base) && atri_ir_valid_type(p, base) &&
-                    (f->instructions[v->left].kind == ATRI_IR_LOCAL || f->instructions[v->left].kind == ATRI_IR_FIELD ||
-                     f->instructions[v->left].kind == ATRI_IR_INDEX || atri_ir_has_value(f->instructions[v->left].kind)) &&
-                    (!atri_ir_is_pointer(input) || operand(&c, i, v->left, input)) &&
+                AtriIRType base = aggregate_base_type(&c, i, v->left);
+                valid = atri_ir_is_array(base) && atri_ir_valid_type(p, base) &&
                     p->arrays[base-ATRI_IR_ARRAY].element == v->type &&
                     (v->right < i && atri_ir_is_integer(f->instructions[v->right].type) && operand(&c, i, v->right, f->instructions[v->right].type));
                 break;
             }
             case ATRI_IR_FIELD: {
-                AtriIRType base = v->left < i ? f->instructions[v->left].type : ATRI_IR_INVALID;
-                if (atri_ir_is_pointer(base)) { base = atri_ir_pointee(base); }
-                valid = available(&c, i, v->left) && atri_ir_is_struct(base) && atri_ir_valid_type(p, base) &&
-                    (f->instructions[v->left].kind == ATRI_IR_LOCAL || f->instructions[v->left].kind == ATRI_IR_FIELD || f->instructions[v->left].kind == ATRI_IR_INDEX || atri_ir_has_value(f->instructions[v->left].kind));
+                AtriIRType base = aggregate_base_type(&c, i, v->left);
+                valid = atri_ir_is_struct(base) && atri_ir_valid_type(p, base);
                 if (valid) {
                     const AtriIRStruct *t = &p->structs[base-ATRI_IR_STRUCT];
                     valid = v->immediate >= t->first_field && v->immediate-t->first_field < t->field_count && p->fields[v->immediate].type == v->type;
@@ -220,7 +227,7 @@ static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, Atr
             }
             case ATRI_IR_ADDRESS:
                 valid = atri_ir_is_pointer(v->type) && available(&c, i, v->left) &&
-                    (f->instructions[v->left].kind == ATRI_IR_LOCAL || f->instructions[v->left].kind == ATRI_IR_FIELD || f->instructions[v->left].kind == ATRI_IR_INDEX) &&
+                    storage_location(f->instructions[v->left].kind) &&
                     f->instructions[v->left].type == atri_ir_pointee(v->type); break;
             case ATRI_IR_LOAD: valid = location(&c, i, v->left, v->type); break;
             case ATRI_IR_STORE: valid = location(&c, i, v->left, v->type) && operand(&c, i, v->right, v->type); break;
