@@ -78,17 +78,18 @@ function(run_library source harness)
     expect_exit("${executable}" 0 ${ARGN})
 endfunction()
 
-# 文本输出不能伪装成可执行文件，也不能在报错前截断用户已有的产物。
-foreach(output_name text-output.exe text-output.ExE)
-    set(guard_output "${OUTPUT_DIR}/${output_name}")
-    file(WRITE "${guard_output}" "preserve existing output")
-    execute_process(COMMAND "${COMPILER}" -o "${guard_output}" "${SOURCE_DIR}/examples/hello.ar"
-        RESULT_VARIABLE status OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 10)
-    file(READ "${guard_output}" preserved)
-    if(NOT "${status}" STREQUAL "2" OR NOT err MATCHES "emits text, not an executable" OR
-        NOT err MATCHES "clang program.s -o program.exe" OR NOT "${preserved}" STREQUAL "preserve existing output")
-        message(FATAL_ERROR "Executable output diagnostic failed (${status})\n${out}\n${err}\nFile contents: ${preserved}")
+# 输出格式由模式决定，文件扩展名不影响内容。
+set(output_source "${SOURCE_DIR}/examples/hello.ar")
+set(assembly_output "${OUTPUT_DIR}/text-output.s")
+run_checked("${COMPILER}" -S -o "${assembly_output}" "${output_source}")
+foreach(output_name text-output.exe text-output-mixed.ExE)
+    set(text_output "${OUTPUT_DIR}/${output_name}")
+    execute_process(COMMAND "${COMPILER}" -S -o "${text_output}" "${output_source}"
+        RESULT_VARIABLE status ERROR_VARIABLE err TIMEOUT 10)
+    if(NOT "${status}" STREQUAL "0" OR NOT err STREQUAL "")
+        message(FATAL_ERROR "Text output to ${output_name} failed (${status})\n${err}")
     endif()
+    run_checked("${CMAKE_COMMAND}" -E compare_files "${assembly_output}" "${text_output}")
 endforeach()
 
 # 每项只列源码和期望返回值；两种等级分别编译执行，验证优化效果时仍需保留行为检查。

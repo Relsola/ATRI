@@ -54,14 +54,6 @@ static void usage(FILE *stream, const char *name) {
           "  clang program.s -o program.exe\n", stream);
 }
 
-static bool executable_output(const char *path) {
-    const char *suffix = strrchr(path, '.');
-    return suffix != NULL && strlen(suffix) == 4 &&
-        (suffix[1] == 'e' || suffix[1] == 'E') &&
-        (suffix[2] == 'x' || suffix[2] == 'X') &&
-        (suffix[3] == 'e' || suffix[3] == 'E');
-}
-
 int main(int argc, char **argv) {
     enum { EMIT_AST, EMIT_IR, EMIT_RAW_IR, EMIT_ASM } mode;
 #ifdef ATRI_COMPILER_DRIVER
@@ -85,11 +77,6 @@ int main(int argc, char **argv) {
     }
     if (input == NULL || (output != NULL && strcmp(input, output) == 0)) {
         usage(stderr, argv[0]); return 2;
-    }
-    if (output != NULL && executable_output(output)) {
-        fprintf(stderr, "%s: error: this tool emits text, not an executable; '.exe' output is not supported\n"
-            "Emit assembly with -S -o program.s, then run: clang program.s -o program.exe\n", output);
-        return 2;
     }
     bool from_stdin = strcmp(input, "-") == 0;
 #ifdef _WIN32

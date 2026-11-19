@@ -246,6 +246,6 @@ $LASTEXITCODE # 3
 
 atri-parse 默认输出 AST，atri-cc 默认输出汇编；两者支持 --emit-ast、--emit-ir-before-opt、--emit-ir、-S、-o，文件名 - 读取标准输入。-O1 默认对直线函数实施折叠、DCE 和小函数内联；-O0 保留运行期调用但仍进行直线局部折叠/DCE。显式常量与优化等级无关。--emit-ir-before-opt 已经完成强制常量求值。退出码 0 成功、1 编译错误、2 命令行/I/O 错误。
 
-所有输出模式均产生文本，`-o` 不根据扩展名切换成二进制或自动链接；`.exe` 输出名（不区分大小写）在打开输出文件前拒绝，返回 2 并提示先生成 .s 再调用 Clang，不覆盖已有文件。真实可执行文件由 `clang source.s -o program.exe` 生成。
+所有输出模式均产生文本，`-o` 指定文件名。生成可执行文件时，先用 `-S` 生成汇编，再运行 `clang source.s -o program.exe`。
 
 CTest 七组：前端、编译器回归、控制流语义/常量、优化效果、IR Verifier、CLI 示例、Windows 原生执行。优化按函数名和明确预期检查；原生测试自动生成具名 C 调用映射，写法见[测试说明](../tests/README.md)。原生测试在 -O0/-O1 下汇编、链接并执行整数、常量、指针、控制流和 puts 示例，核对真实 stdout、UTF-8 字节、内嵌零截断、返回静态字面量及外部调用；C 驱动覆盖 64 位/指针的寄存器与栈参数、C bool/指针返回、外部写入及既有控制流行为。需要本机 Clang、Windows SDK/链接工具，不自动安装依赖。
