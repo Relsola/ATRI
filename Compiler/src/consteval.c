@@ -1,228 +1,547 @@
-#include "ir.h"
-#include <stdlib.h>
+#include "vm_bytecode.h"
+#include "array.h"
+#include "vm_memory.h"
 
+typedef struct {
+    AtriId function;
+    const AtriVmFunction *body;
+    const uint64_t *parameters;
+    uint64_t *values, *locals;
+    unsigned char *states;
+    AtriVmMemory *memory;
+    size_t slots;
+} Frame;
+
+/* 每个等待点保留帧和 PC。依赖返回后继续下一阶段，不重新执行先前的调用或实参。 */
+typedef enum { EVALUATE_VALUE, EXECUTE_BODY, RESOLVE_CONSTANT } TaskKind;
+typedef enum { START, LEFT_READY, RIGHT_READY, ARGUMENT_READY, RESULT_READY } Resume;
+typedef struct {
+    TaskKind kind;
+    Resume resume;
+    Frame *frame;
+    AtriId id;
+    size_t argument;
+    uint64_t *arguments;
+} Task;
 typedef struct {
     AtriIRProgram *program;
     AtriDiagnostic *diagnostic;
-    size_t remaining_steps, depth;
+    AtriVmFunction *functions;
+    AtriVmMemory memory;
+    Task *tasks;
+    size_t task_count, capacity, value_depth, remaining_steps;
+    uint64_t result;
 } Evaluation;
-typedef struct {
-    Evaluation *evaluation;
-    AtriIRFunction *function;
-    const uint64_t *parameters;
-    /* values 缓存本次指令执行的结果；locals 保存可被 store 修改的对象内容，两者不能共用。 */
-    uint64_t *values;
-    uint64_t *locals;
-    unsigned char *states; /* 0 未求值，1 正在求值，2 已缓存；状态 1 再次被依赖表示循环。 */
-} Frame;
 
 static bool error(Evaluation *e, AtriSpan span, const char *message) {
-    *e->diagnostic = (AtriDiagnostic){span, message}; return false;
+    *e->diagnostic = (AtriDiagnostic){.span = span, .message = message};
+    return false;
 }
 static bool step(Evaluation *e, AtriSpan span) {
-    if (e->remaining_steps == 0)
+    if (!e->remaining_steps) {
         return error(e, span, "compile-time evaluation exceeded its step limit");
-    --e->remaining_steps; return true;
+    }
+    --e->remaining_steps;
+    return true;
 }
-static bool create_frame(Evaluation *e, AtriIRFunction *f,
-                          const uint64_t *parameters, Frame *out) {
-    *out = (Frame){.evaluation = e, .function = f, .parameters = parameters};
-    out->values = calloc(f->instruction_count, sizeof(*out->values));
-    out->states = calloc(f->instruction_count, sizeof(*out->states));
-    out->locals = calloc(f->instruction_count, sizeof(*out->locals));
-    if (out->values == NULL || out->states == NULL || out->locals == NULL) {
-        free(out->values); free(out->states); free(out->locals);
-        return error(e, f->name, "out of memory during compile-time evaluation");
+static void destroy_frame(Frame *frame) {
+    if (frame) {
+        for (size_t i = 0; frame->locals && i < frame->slots; ++i) {
+            if (frame->locals[i]) { atri_vm_drop(frame->memory, frame->locals[i]); }
+        }
+        free(frame->values);
+        free(frame->states);
+        free(frame->locals);
+        free(frame);
+    }
+}
+static Frame *create_frame(Evaluation *e, AtriId function, const uint64_t *args) {
+    AtriIRFunction *f = &e->program->functions[function];
+    AtriVmFunction *body = &e->functions[function];
+    if (!atri_vm_prepare(f, body, e->diagnostic)) {
+        return NULL;
+    }
+    Frame *frame = calloc(1, sizeof(*frame));
+    if (frame) {
+        frame->function = function;
+        frame->slots = f->instruction_count;
+        frame->memory = &e->memory;
+        frame->body = body;
+        frame->parameters = args;
+        frame->values = calloc(f->instruction_count, sizeof(*frame->values));
+        frame->states = calloc(f->instruction_count, sizeof(*frame->states));
+        frame->locals = calloc(f->instruction_count, sizeof(*frame->locals));
+        if (frame->values && frame->states && frame->locals) {
+            return frame;
+        }
+    }
+    destroy_frame(frame);
+    error(e, f->name, "out of memory during compile-time evaluation");
+    return NULL;
+}
+static bool push(Evaluation *e, Task task, AtriSpan span) {
+    if (!atri_append((void **)&e->tasks, &e->task_count, &e->capacity, sizeof(task), &task)) {
+        if (task.kind != EVALUATE_VALUE) {
+            destroy_frame(task.frame);
+        }
+        return error(e, span, "out of memory scheduling compile-time evaluation");
     }
     return true;
 }
-static void destroy_frame(Frame *f) { free(f->values); free(f->states); free(f->locals); }
-static bool value(Frame *frame, AtriId id, uint64_t *out);
-
-static bool constant(Evaluation *e, AtriIRFunction *f, AtriIRConstant *c, uint64_t *out) {
-    if (c->state == 2) { *out = c->bits; return true; }
-    if (c->state == 1) return error(e, c->span, "cyclic compile-time constant dependency");
+static bool demand(Evaluation *e, Frame *frame, AtriId id) {
+    AtriSpan span = e->program->functions[frame->function].instructions[id].span;
+    if (!step(e, span)) {
+        return false;
+    }
+    if (++e->value_depth > 256) {
+        return error(e, span, "compile-time evaluation exceeded its recursion/dependency depth limit");
+    }
+    return push(e, (Task){.kind = EVALUATE_VALUE, .frame = frame, .id = id}, span);
+}
+/* 前缀快照与最终程序的函数编号不同。用模块、声明位置和义务序号识别同一求值请求。 */
+typedef struct {
+    char *path;
+    size_t owner, site, ordinal;
+    AtriIRType type;
+    uint64_t bits;
+    unsigned char *bytes;
+    size_t size;
+} SavedRun;
+struct AtriRunCache { SavedRun *items; size_t count, capacity; };
+struct AtriRunCache *atri_run_cache_create(void) { return calloc(1, sizeof(struct AtriRunCache)); }
+void atri_run_cache_destroy(struct AtriRunCache *cache) {
+    if (!cache) { return; }
+    for (size_t i = 0; i < cache->count; ++i) { free(cache->items[i].path); free(cache->items[i].bytes); }
+    free(cache->items); free(cache);
+}
+static SavedRun run_key(const Evaluation *e, AtriId id, size_t ordinal) {
+    const AtriProgram *ast = e->program->lowering_ast;
+    const AtriIRFunction *f = &e->program->functions[id];
+    const AtriIRConstant *c = &f->constants[ordinal];
+    AtriModule m = ast->modules[atri_module_at(ast, c->span.start)];
+    return (SavedRun){.path = m.path, .owner = f->name.start - m.span.start, .site = c->span.start - m.span.start,
+        .ordinal = ordinal, .type = f->instructions[c->result].type};
+}
+static const SavedRun *find_run(const struct AtriRunCache *cache, SavedRun key) {
+    for (size_t i = 0; i < cache->count; ++i) {
+        const SavedRun *s = &cache->items[i];
+        if (key.site == s->site && key.owner == s->owner && key.ordinal == s->ordinal &&
+            key.type == s->type && !strcmp(key.path, s->path)) { return s; }
+    }
+    return NULL;
+}
+static bool save_run(Evaluation *e, AtriId id, size_t ordinal) {
+    const AtriProgram *ast = e->program->lowering_ast;
+    AtriIRConstant *c = &e->program->functions[id].constants[ordinal];
+    if (!ast || !ast->run_cache || ast->owns_run_cache || c->capture_owner) { return true; }
+    SavedRun item = run_key(e, id, ordinal);
+    if (find_run(ast->run_cache, item)) { return true; }
+    char *path = malloc(strlen(item.path) + 1);
+    if (path) { strcpy(path, item.path); }
+    item.path = path; item.bits = c->bits;
+    if (item.type == ATRI_IR_PTR_U8 && c->bits) {
+        unsigned char *data = atri_vm_bytes(&e->memory, c->bits, 0, false);
+        if (!data) { free(path); return error(e, c->span, "expired compile-time pointer"); }
+        item.size = e->memory.objects[(c->bits >> 32) - 1].size - (uint32_t)c->bits;
+        item.bytes = malloc(item.size ? item.size : 1);
+        if (!item.bytes) { free(path); return error(e, c->span, "out of memory storing compile-time bytes"); }
+        memcpy(item.bytes, data, item.size);
+    }
+    struct AtriRunCache *cache = ast->run_cache;
+    if (!path || !atri_append((void **)&cache->items, &cache->count, &cache->capacity, sizeof(item), &item)) {
+        free(path); free(item.bytes); return error(e, c->span, "out of memory caching compile-time result");
+    }
+    return true;
+}
+static bool constant(Evaluation *e, AtriId function, AtriId index) {
+    AtriIRConstant *c = &e->program->functions[function].constants[index];
+    if (c->state == 2) {
+        e->result = c->bits;
+        return true;
+    }
+    if (c->state == 1) {
+        return error(e, c->span, "cyclic compile-time constant dependency");
+    }
+    const AtriProgram *ast = e->program->lowering_ast;
+    if (ast && ast->run_cache && !c->capture_owner) {
+        const SavedRun *s = find_run(ast->run_cache, run_key(e, function, index));
+        if (s) {
+            c->bits = s->bytes ? atri_vm_object(&e->memory, s->size, VM_LITERAL, s->bytes) : s->bits;
+            if (s->bytes && !c->bits) { return error(e, c->span, "out of memory restoring compile-time bytes"); }
+            c->state = 2; e->result = c->bits; return true;
+        }
+    }
+    Frame *frame = create_frame(e, function, NULL);
+    if (!frame || !push(e, (Task){.kind = RESOLVE_CONSTANT, .frame = frame, .id = index}, c->span)) {
+        return false;
+    }
     c->state = 1;
-    Frame frame;
-    /* 声明常量独立求值，不继承当前调用的运行期参数；函数调用内部的已知实参仍可正常使用。 */
-    if (!create_frame(e, f, NULL, &frame)) return false;
-    bool ok = value(&frame, c->expression, &c->bits);
-    destroy_frame(&frame);
-    if (ok) { c->state = 2; *out = c->bits; }
-    return ok;
+    return c->capture_owner ? constant(e, c->capture_owner - 1, c->expression) : demand(e, frame, c->expression);
 }
-
-/* 按程序计数器执行实际路径，包括结果未使用的调用；仅递归求最终返回值会漏掉副作用或不终止行为。 */
-static bool execute(Evaluation *e, AtriId callee, const uint64_t *arguments, uint64_t *out) {
-    AtriIRFunction *f = &e->program->functions[callee];
-    Frame frame;
-    if (!create_frame(e, f, arguments, &frame)) return false;
-    size_t blocks = f->block_count ? f->block_count : 1;
-    size_t *labels = calloc(blocks, sizeof(*labels));
-    if (!labels) { destroy_frame(&frame); return error(e, f->name, "out of memory during compile-time evaluation"); }
-    for (size_t i = 0; i < f->instruction_count; ++i)
-        if (f->instructions[i].kind == ATRI_IR_LABEL) labels[f->instructions[i].immediate] = i;
-    bool ok = false;
-    for (size_t i = 0; i < f->instruction_count;) {
-        /* := 初始化是独立义务，不属于每次调用的运行期语句；跳到结果占位后按需取得常量。 */
-        for (size_t c = 0; c < f->constant_count; ++c)
-            if (f->constants[c].first_instruction == i && i < f->constants[c].result) {
-                i = f->constants[c].result; break;
-            }
-        const AtriIRInst *inst = &f->instructions[i];
-        if (!step(e, inst->span)) break;
-        if (inst->kind == ATRI_IR_RETURN) {
-            if (inst->type == ATRI_IR_VOID) { *out = 0; ok = true; }
-            else { ok = value(&frame, inst->left, out); }
-            break;
-        }
-        if (inst->kind == ATRI_IR_JUMP) { i = labels[inst->target]; continue; }
-        if (inst->kind == ATRI_IR_BRANCH) {
-            uint64_t condition;
-            if (!value(&frame, inst->left, &condition)) break;
-            i = labels[condition ? inst->target : inst->alternative]; continue;
-        }
-        if (inst->kind == ATRI_IR_UNREACHABLE) { error(e, inst->span, "compile-time function reached its end without returning"); break; }
-        if (inst->kind == ATRI_IR_NOP || inst->kind == ATRI_IR_LABEL) { ++i; continue; }
-        if (inst->kind == ATRI_IR_LOCAL && inst->immediate == 0) {
-            if (atri_ir_is_pointer(inst->type)) { error(e, inst->span, "compile-time pointer operations are not supported yet"); break; }
-            frame.locals[i] = 0; ++i; continue;
-        }
-        if (inst->kind == ATRI_IR_STORE) {
-            uint64_t stored;
-            if (f->instructions[inst->left].kind != ATRI_IR_LOCAL || f->instructions[inst->left].immediate != 0) {
-                error(e, inst->span, "compile-time pointer operations are not supported yet"); break;
-            }
-            if (!value(&frame, inst->right, &stored)) break;
-            frame.locals[inst->left] = stored; ++i; continue;
-        }
-        /* 同一指令可被循环再次执行，必须刷新它的结果；已执行的操作数缓存则代表当前迭代的值。 */
-        frame.states[i] = 0;
-        uint64_t ignored;
-        if (!value(&frame, i, &ignored)) break;
-        ++i;
+static void pop(Evaluation *e) {
+    Task *task = &e->tasks[--e->task_count];
+    free(task->arguments);
+    if (task->kind == EVALUATE_VALUE) {
+        --e->value_depth;
+    } else {
+        destroy_frame(task->frame);
     }
-    free(labels); destroy_frame(&frame); return ok;
 }
-
-static bool value(Frame *frame, AtriId id, uint64_t *out) {
-    Evaluation *e = frame->evaluation;
-    AtriIRFunction *f = frame->function;
-    const AtriIRInst *inst = &f->instructions[id];
-    if (atri_ir_is_aggregate(inst->type) || inst->kind == ATRI_IR_FIELD || inst->kind == ATRI_IR_INDEX) { return error(e, inst->span, "compile-time struct and array values are not supported yet"); }
-    if ((!atri_ir_is_integer(inst->type) && inst->type != ATRI_IR_BOOL && !(inst->kind == ATRI_IR_CALL && inst->type == ATRI_IR_VOID)) || inst->kind == ATRI_IR_LOCAL ||
-        inst->kind == ATRI_IR_STORE || inst->kind == ATRI_IR_PTR_DIFF || inst->kind == ATRI_IR_ADDRESS ||
-        (inst->kind == ATRI_IR_LOAD && (f->instructions[inst->left].kind != ATRI_IR_LOCAL || f->instructions[inst->left].immediate != 0)))
-        return error(e, inst->span, "compile-time pointer operations are not supported yet");
-    if (!step(e, inst->span)) return false;
-    if (++e->depth > 256) {
-        --e->depth;
-        return error(e, inst->span, "compile-time evaluation exceeded its recursion/dependency depth limit");
+static bool finish_value(Evaluation *e, Task *t, uint64_t result) {
+    t->frame->values[t->id] = result;
+    t->frame->states[t->id] = 2;
+    e->result = result;
+    pop(e);
+    return true;
+}
+static bool call(Evaluation *e, Task *t, const AtriIRInst *v, AtriSpan span) {
+    const AtriIRFunction *caller = &e->program->functions[t->frame->function];
+    if (t->resume == START && v->argument_count) {
+        t->arguments = calloc(v->argument_count, sizeof(*t->arguments));
+        if (!t->arguments) {
+            return error(e, span, "out of memory during compile-time call");
+        }
+    } else if (t->resume == ARGUMENT_READY) {
+        t->arguments[t->argument++] = e->result;
     }
-    bool ok = false;
-    if (frame->states[id] == 2) { *out = frame->values[id]; ok = true; goto done; }
-    if (frame->states[id] == 1) { error(e, inst->span, "cyclic compile-time value dependency"); goto done; }
-    frame->states[id] = 1;
-    for (size_t c = 0; c < f->constant_count; ++c)
-        if (f->constants[c].result == id) {
-            ok = constant(e, f, &f->constants[c], out); goto save;
+    if (t->argument < v->argument_count) {
+        t->resume = ARGUMENT_READY;
+        return demand(e, t->frame, caller->arguments[v->first_argument + t->argument]);
+    }
+    if (e->program->functions[v->callee].external_c) {
+        uint64_t bits;
+        if (!atri_vm_host(&e->memory, e->program, &e->program->functions[v->callee],
+                          t->arguments, v->argument_count, &bits, span, e->diagnostic)) { return false; }
+        return finish_value(e, t, bits);
+    }
+    t->resume = RESULT_READY;
+    Frame *callee = create_frame(e, (AtriId)v->callee, t->arguments);
+    return callee && push(e, (Task){.kind = EXECUTE_BODY, .frame = callee}, span);
+}
+static bool value(Evaluation *e, Task *t) {
+    Frame *frame = t->frame;
+    const AtriIRInst *v = &frame->body->code[t->id];
+    AtriSpan span = e->program->functions[frame->function].instructions[t->id].span;
+    if (t->resume == RESULT_READY) {
+        return finish_value(e, t, e->result);
+    }
+    if (t->resume == START) {
+        if (frame->states[t->id] == 2) {
+            return finish_value(e, t, frame->values[t->id]);
         }
-    switch (inst->kind) {
-        case ATRI_IR_C_PROMOTE: {
-            uint64_t source;
-            if (value(frame, inst->left, &source)) {
-                *out = f->instructions[inst->left].type == ATRI_IR_BOOL ? source :
-                    atri_integer_convert(f->instructions[inst->left].type, ATRI_IR_I32, source);
-                ok = true;
-            }
-            break;
+        if (frame->states[t->id] == 1) {
+            return error(e, span, "cyclic compile-time value dependency");
         }
-        case ATRI_IR_CAST: {
-            uint64_t source;
-            if (value(frame, inst->left, &source)) {
-                *out = atri_integer_convert(f->instructions[inst->left].type, inst->type, source); ok = true;
-            }
-            break;
-        }
-        case ATRI_IR_LOAD: *out = frame->locals[inst->left]; ok = true; break;
-        case ATRI_IR_LAZY_SELECT: {
-            uint64_t condition;
-            if (value(frame, inst->left, &condition)) { ok = value(frame, condition ? inst->right : inst->callee, out); }
-            break;
-        }
-        case ATRI_IR_LAZY_LOGICAL: {
-            uint64_t a;
-            if (!value(frame, inst->left, &a)) break;
-            if ((inst->op == ATRI_AND && !a) || (inst->op == ATRI_OR && a)) { *out = a; ok = true; }
-            else ok = value(frame, inst->right, out);
-            break;
-        }
-        case ATRI_IR_COMPARE: {
-            uint64_t a, b;
-            if (value(frame, inst->left, &a) && value(frame, inst->right, &b)) {
-                *out = atri_compare(f->instructions[inst->left].type, inst->op, a, b); ok = true;
-            }
-            break;
-        }
-        case ATRI_IR_CONST: *out = inst->immediate; ok = true; break;
+        frame->states[t->id] = 1;
+    }
+    if (frame->body->constants && frame->body->constants[t->id]) {
+        t->resume = RESULT_READY;
+        return constant(e, frame->function, frame->body->constants[t->id] - 1);
+    }
+    switch (v->kind) {
+        case ATRI_IR_CONST: return finish_value(e, t, v->immediate);
         case ATRI_IR_PARAM:
-            if (frame->parameters == NULL) error(e, inst->span, "compile-time expression depends on a runtime parameter");
-            else { *out = frame->parameters[inst->immediate]; ok = true; }
-            break;
-        case ATRI_IR_UNARY: case ATRI_IR_BINARY: {
-            uint64_t a, b = 0;
-            if (!value(frame, inst->left, &a)) break;
-            if (inst->kind == ATRI_IR_BINARY && !value(frame, inst->right, &b)) break;
-            if (inst->op == ATRI_NOT) { *out = !a; ok = true; break; }
-            if (!atri_integer_compute(inst->type, inst->op, a, b, out))
-                error(e, inst->span, (inst->op == ATRI_SHL || inst->op == ATRI_SHR) ? "compile-time shift count is outside the operand width" :
-                      b == 0 ? "compile-time division or remainder by zero" :
-                      "invalid compile-time signed integer division or remainder (INT_MIN / -1)");
-            else ok = true;
-            break;
-        }
-        case ATRI_IR_CALL: {
-            if (e->program->functions[inst->callee].external_c) {
-                error(e, inst->span, "extern(C) calls cannot execute at compile time"); break;
+            if (!frame->parameters) { return error(e, span, "compile-time expression depends on a runtime parameter"); }
+            return finish_value(e, t, frame->parameters[v->immediate]);
+        case ATRI_IR_STRING: {
+            if (!e->memory.literals) {
+                e->memory.literals = calloc(e->program->string_count, sizeof(*e->memory.literals));
+                if (!e->memory.literals) { return error(e, span, "out of memory loading VM literals"); }
             }
-            uint64_t *args = inst->argument_count == 0 ? NULL : malloc(inst->argument_count * sizeof(*args));
-            if (inst->argument_count != 0 && args == NULL) { error(e, inst->span, "out of memory during compile-time call"); break; }
-            ok = true;
-            for (size_t a = 0; a < inst->argument_count; ++a)
-                if (!value(frame, f->arguments[inst->first_argument + a], &args[a])) { ok = false; break; }
-            if (ok) ok = execute(e, inst->callee, args, out);
-            free(args); break;
+            uint64_t *address = &e->memory.literals[v->immediate];
+            const AtriIRString *str = &e->program->strings[v->immediate];
+            if (!*address) { *address = atri_vm_object(&e->memory, str->length + 1, VM_LITERAL, str->bytes); }
+            return *address ? finish_value(e, t, *address) : error(e, span, "out of memory loading VM literal");
         }
-        default: error(e, inst->span, "invalid instruction in compile-time expression"); break;
+        case ATRI_IR_CALL: return call(e, t, v, span);
+        case ATRI_IR_ZERO: {
+            uint64_t addr = atri_vm_object(&e->memory, atri_ir_type_size(e->program, v->type), VM_LOCAL, NULL);
+            return addr ? finish_value(e, t, addr) : error(e, span, "out of memory creating VM aggregate");
+        }
+        case ATRI_IR_LOAD: case ATRI_IR_ADDRESS: case ATRI_IR_FIELD: case ATRI_IR_INDEX:
+        case ATRI_IR_PTR_OFFSET: case ATRI_IR_PTR_DIFF: case ATRI_IR_COMPARE: case ATRI_IR_UNARY:
+        case ATRI_IR_BINARY: case ATRI_IR_CAST: case ATRI_IR_C_PROMOTE:
+        case ATRI_IR_LAZY_SELECT: case ATRI_IR_LAZY_LOGICAL: break;
+        default: return error(e, span, "invalid instruction in compile-time expression");
     }
-save:
-    if (ok) { frame->values[id] = *out; frame->states[id] = 2; }
-done:
-    --e->depth; return ok;
+    if (t->resume == START) {
+        t->resume = LEFT_READY;
+        return demand(e, frame, v->left);
+    }
+    uint64_t left = frame->values[v->left];
+    if (v->kind == ATRI_IR_LOAD) {
+        size_t size = atri_ir_type_size(e->program, v->type);
+        const unsigned char *src = atri_vm_bytes(&e->memory, left, size, false);
+        if (!src) { return error(e, span, "invalid or expired pointer in compile-time load"); }
+        uint64_t bits = 0;
+        if (atri_ir_is_aggregate(v->type)) {
+            bits = atri_vm_object(&e->memory, size, VM_LOCAL, src);
+            if (!bits) { return error(e, span, "out of memory copying VM aggregate"); }
+        } else { memcpy(&bits, src, size); }
+        return finish_value(e, t, bits);
+    }
+    if (v->kind == ATRI_IR_ADDRESS) { return finish_value(e, t, left); }
+    if (v->kind == ATRI_IR_FIELD) {
+        uint64_t addr;
+        if (!atri_vm_offset(&e->memory, left, false, e->program->fields[v->immediate].offset, 1, &addr)) {
+            return error(e, span, "invalid compile-time field address");
+        }
+        return finish_value(e, t, addr);
+    }
+    if (v->kind == ATRI_IR_CAST || v->kind == ATRI_IR_C_PROMOTE) {
+        AtriIRType source = frame->body->code[v->left].type;
+        return finish_value(e, t, source == ATRI_IR_BOOL || atri_ir_is_pointer(source) ? left :
+                            atri_integer_convert(source, v->type, left));
+    }
+    if (v->kind == ATRI_IR_LAZY_SELECT || v->kind == ATRI_IR_LAZY_LOGICAL) {
+        if (v->kind == ATRI_IR_LAZY_LOGICAL && (v->op == ATRI_AND ? !left : left)) {
+            return finish_value(e, t, left);
+        }
+        t->resume = RESULT_READY;
+        return demand(e, frame, v->kind == ATRI_IR_LAZY_SELECT && !left ? v->callee : v->right);
+    }
+    if (v->kind != ATRI_IR_UNARY && t->resume == LEFT_READY) {
+        t->resume = RIGHT_READY;
+        return demand(e, frame, v->right);
+    }
+    uint64_t right = v->kind == ATRI_IR_UNARY ? 0 : e->result;
+    if (v->kind == ATRI_IR_COMPARE) {
+        return finish_value(e, t, atri_compare(frame->body->code[v->left].type, v->op, left, right));
+    }
+    if (v->kind == ATRI_IR_PTR_DIFF) {
+        size_t stride = atri_ir_type_size(e->program, atri_ir_pointee(frame->body->code[v->left].type));
+        if (!stride || (left >> 32) != (right >> 32)) { return error(e, span, "unrelated pointers in compile-time subtraction"); }
+        int64_t distance = (int64_t)(uint32_t)left - (int64_t)(uint32_t)right;
+        return finish_value(e, t, (uint64_t)(distance / (int64_t)stride));
+    }
+    if (v->kind == ATRI_IR_PTR_OFFSET || v->kind == ATRI_IR_INDEX) {
+        AtriIRType index = frame->body->code[v->right].type;
+        bool negative = atri_integer_is_signed(index) && atri_integer_signed(index, right) < 0;
+        uint64_t magnitude = negative ? 0 - (uint64_t)atri_integer_signed(index, right) : right;
+        size_t stride = atri_ir_type_size(e->program, v->kind == ATRI_IR_INDEX ? v->type : atri_ir_pointee(v->type));
+        uint64_t address;
+        if (!atri_vm_offset(&e->memory, left, negative != (v->kind == ATRI_IR_PTR_OFFSET && v->op == ATRI_SUB),
+                            magnitude, stride, &address)) { return error(e, span, "compile-time pointer offset is out of bounds"); }
+        return finish_value(e, t, address);
+    }
+    uint64_t bits;
+    if (v->op == ATRI_NOT) {
+        bits = !left;
+    } else if (!atri_integer_compute(v->type, v->op, left, right, &bits)) {
+        if (v->op == ATRI_SHL || v->op == ATRI_SHR) {
+            return error(e, span, "compile-time shift count is outside the operand width");
+        }
+        return error(e, span, right == 0 ? "compile-time division or remainder by zero" :
+                     "invalid compile-time signed integer division or remainder (INT_MIN / -1)");
+    }
+    return finish_value(e, t, bits);
+}
+static bool execute(Evaluation *e, Task *t) {
+    Frame *frame = t->frame;
+    const AtriIRFunction *f = &e->program->functions[frame->function];
+    if (t->id >= f->instruction_count) {
+        return error(e, f->name, "compile-time function reached its end without returning");
+    }
+    if (t->resume == START && frame->body->skip_initializer && frame->body->skip_initializer[t->id]) {
+        t->id = frame->body->skip_initializer[t->id];
+    }
+    const AtriIRInst *v = &frame->body->code[t->id];
+    AtriSpan span = f->instructions[t->id].span;
+    if (t->resume == RESULT_READY) {
+        t->resume = START;
+        switch (v->kind) {
+            case ATRI_IR_RETURN: pop(e); return true;
+            case ATRI_IR_BRANCH: t->id = frame->body->labels[e->result ? v->target : v->alternative]; return true;
+            case ATRI_IR_STORE: {
+                size_t size = atri_ir_type_size(e->program, v->type);
+                unsigned char *dst = atri_vm_bytes(&e->memory, frame->values[v->left], size, true);
+                const void *src = atri_ir_is_aggregate(v->type) ?
+                    (const void *)atri_vm_bytes(&e->memory, e->result, size, false) : (const void *)&e->result;
+                if (!dst || !src) { return error(e, span, "invalid or read-only pointer in compile-time store"); }
+                memmove(dst, src, size);
+                break;
+            }
+            default: break; /* 普通值已在 demand 返回时写入对应寄存器。 */
+        }
+        ++t->id;
+        return true;
+    }
+    if (!step(e, span)) {
+        return false;
+    }
+    AtriId operand = t->id;
+    switch (v->kind) {
+        case ATRI_IR_LOCAL: {
+            if (v->immediate) { return error(e, span, "compile-time expression cannot access a runtime global"); }
+            size_t slot = t->id++, size = atri_ir_type_size(e->program, v->type);
+            if (!frame->locals[slot]) { frame->locals[slot] = atri_vm_object(&e->memory, size, VM_LOCAL, NULL); }
+            if (!frame->locals[slot]) { return error(e, span, "out of memory allocating VM local"); }
+            memset(atri_vm_bytes(&e->memory, frame->locals[slot], size, true), 0, size);
+            frame->values[slot] = frame->locals[slot];
+            frame->states[slot] = 2;
+            return true;
+        }
+        case ATRI_IR_LABEL: case ATRI_IR_NOP: ++t->id; return true;
+        case ATRI_IR_JUMP: t->id = frame->body->labels[v->target]; return true;
+        case ATRI_IR_UNREACHABLE: return error(e, span, "compile-time function reached its end without returning");
+        case ATRI_IR_RETURN:
+            if (v->type == ATRI_IR_VOID) {
+                e->result = 0;
+                pop(e);
+                return true;
+            }
+            operand = v->left;
+            break;
+        case ATRI_IR_BRANCH: operand = v->left; break;
+        case ATRI_IR_STORE: operand = v->right; break;
+        default:
+            /* 循环回边可再次经过同一 PC。本次执行刷新该槽，其余已执行的操作数仍有效。 */
+            frame->states[t->id] = 0;
+            break;
+    }
+    t->resume = RESULT_READY;
+    return demand(e, frame, operand);
 }
 
-bool atri_resolve_constants(AtriIRProgram *p, AtriDiagnostic *d) {
-    /* 预算由整次求值共享，避免嵌套调用每次重新获得额度而绕过限制。 */
-    Evaluation e = {.program = p, .diagnostic = d, .remaining_steps = 100000};
-    /* 先求完所有声明，再改写 IR；包括 return 后的声明，也避免依赖求值读到已被删除的初始化。 */
-    for (size_t n = 0; n < p->function_count; ++n) {
-        AtriIRFunction *f = &p->functions[n];
-        for (size_t c = 0; c < f->constant_count; ++c) {
-            uint64_t result;
-            if (!constant(&e, f, &f->constants[c], &result)) return false;
+static bool drive(Evaluation *e) {
+    while (e->task_count) {
+        Task *t = &e->tasks[e->task_count - 1];
+        switch (t->kind) {
+            case EVALUATE_VALUE: if (!value(e, t)) { return false; } break;
+            case EXECUTE_BODY: if (!execute(e, t)) { return false; } break;
+            case RESOLVE_CONSTANT: {
+                AtriIRConstant *ready = &e->program->functions[t->frame->function].constants[t->id];
+                ready->bits = ready->discard ? 0 : e->result;
+                e->result = ready->bits;
+                ready->state = 2;
+                if (!save_run(e, t->frame->function, t->id)) { return false; }
+                pop(e);
+                break;
+            }
         }
     }
+    return true;
+}
+
+static bool resolve(Evaluation *e) {
+    for (size_t n = 0; n < e->program->function_count; ++n) {
+        AtriIRFunction *f = &e->program->functions[n];
+        if (!f->constant_count) {
+            continue;
+        }
+        if (!e->functions) {
+            e->functions = calloc(e->program->function_count, sizeof(*e->functions));
+            if (!e->functions) {
+                return error(e, f->name, "out of memory preparing compile-time bytecode");
+            }
+        }
+        for (size_t c = 0; c < f->constant_count; ++c) {
+            if (!constant(e, n, c)) {
+                return false;
+            }
+            if (!drive(e)) { return false; }
+        }
+    }
+    return true;
+}
+
+static void trace_task(Evaluation *e, Task *t) {
+    const AtriIRFunction *f = &e->program->functions[t->frame->function];
+    if (t->kind == EVALUATE_VALUE && f->instructions[t->id].kind == ATRI_IR_CALL) {
+        atri_diagnostic_note(e->diagnostic, f->instructions[t->id].span, "called during compile-time evaluation here");
+    } else if (t->kind == RESOLVE_CONSTANT) {
+        atri_diagnostic_note(e->diagnostic, f->constants[t->id].span, "required by compile-time evaluation here");
+    }
+}
+static bool materialize(Evaluation *e, const AtriIRConstant *c, AtriIRInst *result) {
+    if (!c->bits && c->nonnull_use.end) {
+        return error(e, c->nonnull_use, "cannot dereference a statically known null pointer");
+    }
+    result->immediate = c->bits;
+    if (result->type != ATRI_IR_PTR_U8 || !c->bits) { return true; }
+    size_t length;
+    const char *bytes = atri_vm_text(&e->memory, c->bits, &length);
+    if (!bytes) { return error(e, c->span, "#run byte-string result must be live and zero terminated"); }
+    const AtriVmObject *object = &e->memory.objects[(c->bits >> 32) - 1];
+    size_t remaining = object->size - (uint32_t)c->bits;
+    /* 字节指针还可以索引内嵌零之后的内容，整个剩余区间都要保留。 */
+    AtriIRString data = {.length = remaining - (bytes[remaining - 1] == 0)};
+    data.bytes = calloc(data.length + 1, 1);
+    if (data.bytes) { memcpy(data.bytes, bytes, data.length); }
+    AtriIRProgram *p = e->program;
+    result->kind = ATRI_IR_STRING;
+    result->immediate = p->string_count;
+    if (!data.bytes || !atri_append((void **)&p->strings, &p->string_count, &p->string_capacity, sizeof(data), &data)) {
+        free(data.bytes); return error(e, c->span, "out of memory materializing #run byte string");
+    }
+    return true;
+}
+bool atri_resolve_constants(AtriIRProgram *p, AtriDiagnostic *d) {
+    Evaluation e = {.program = p, .diagnostic = d, .remaining_steps = 100000};
+    bool ok = resolve(&e);
+    while (e.task_count) {
+        trace_task(&e, &e.tasks[e.task_count-1]);
+        pop(&e);
+    }
+    free(e.tasks);
+    atri_vm_release(e.functions, p->function_count);
+    if (!ok) {
+        atri_vm_memory_destroy(&e.memory);
+        return false;
+    }
+    /* 所有义务都成功后统一回填，包括永远不会在目标程序中执行的声明。 */
     for (size_t n = 0; n < p->function_count; ++n) {
         AtriIRFunction *f = &p->functions[n];
         for (size_t c = 0; c < f->constant_count; ++c) {
             const AtriIRConstant *binding = &f->constants[c];
-            for (size_t i = binding->first_instruction; i < binding->result; ++i)
+            for (size_t i = binding->first_instruction; i < binding->result; ++i) {
                 f->instructions[i].kind = ATRI_IR_NOP;
+            }
             f->instructions[binding->result] = (AtriIRInst){.kind = ATRI_IR_CONST,
-                .span = binding->span, .type = f->instructions[binding->result].type, .immediate = binding->bits};
+                .span = binding->span, .type = f->instructions[binding->result].type};
+            if (!materialize(&e, binding, &f->instructions[binding->result])) {
+                atri_vm_memory_destroy(&e.memory); return false;
+            }
         }
-        free(f->constants); f->constants = NULL;
-        f->constant_count = 0; f->constant_capacity = 0;
+        free(f->constants);
+        f->constants = NULL;
+        f->constant_count = 0;
+        f->constant_capacity = 0;
     }
+    atri_vm_memory_destroy(&e.memory);
     return true;
+}
+
+bool atri_vm_generate(AtriIRProgram *p, AtriVmFunction *functions, AtriId id, const AtriVmArgument *args,
+                      char **text, size_t *length, AtriDiagnostic *d) {
+    AtriIRFunction *f = &p->functions[id];
+    Evaluation e = {.program = p, .diagnostic = d, .functions = functions, .remaining_steps = 100000};
+    uint64_t *values = calloc(f->parameter_count + 1, sizeof(*values));
+    bool ok = values != NULL;
+    for (size_t i = 0; ok && i < f->parameter_count; ++i) {
+        if (args[i].text) {
+            values[i] = atri_vm_object(&e.memory, args[i].length + 1, VM_LITERAL, args[i].text);
+            ok = values[i] != 0;
+        } else { values[i] = args[i].bits; }
+    }
+    if (!ok) { error(&e, f->name, "out of memory preparing generator arguments"); }
+    Frame *frame = ok ? create_frame(&e, id, values) : NULL;
+    ok = frame && push(&e, (Task){.kind = EXECUTE_BODY, .frame = frame}, f->name) && drive(&e);
+    if (ok) {
+        const char *src = atri_vm_text(&e.memory, e.result, length);
+        if (!src) { ok = error(&e, f->name, "generator returned a null, expired or unterminated source string"); }
+        else {
+            *text = malloc(*length + 1);
+            if (*text) { memcpy(*text, src, *length + 1); }
+            else { ok = error(&e, f->name, "out of memory copying generated source"); }
+        }
+    }
+    while (e.task_count) {
+        Task *task = &e.tasks[e.task_count-1];
+        trace_task(&e, task);
+        pop(&e);
+    }
+    free(e.tasks); free(values);
+    atri_vm_memory_destroy(&e.memory);
+    return ok;
 }

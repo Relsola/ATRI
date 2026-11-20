@@ -1,10 +1,10 @@
 #ifndef ATRI_LEXER_H
 #define ATRI_LEXER_H
 
-#include "frontend.h"
+#include "meta_syntax.h"
 
 typedef enum {
-    ATRI_TOKEN_EOF,
+    ATRI_TOKEN_EOF, ATRI_TOKEN_INSERT, ATRI_TOKEN_CUSTOM, ATRI_TOKEN_KEYWORD, ATRI_TOKEN_ANNOTATION,
     ATRI_TOKEN_ERROR,
     ATRI_TOKEN_STRUCT, ATRI_TOKEN_UNION, ATRI_TOKEN_ENUM, ATRI_TOKEN_SWITCH, ATRI_TOKEN_CASE, ATRI_TOKEN_DEFAULT,
     ATRI_TOKEN_DOT, ATRI_TOKEN_ELLIPSIS, ATRI_TOKEN_FN, ATRI_TOKEN_IMPORT, ATRI_TOKEN_EXPORT, ATRI_TOKEN_SCOPE,
@@ -38,11 +38,13 @@ typedef enum {
 typedef struct {
     AtriTokenKind kind;
     AtriSpan span;
+    const AtriOperator *custom;
 } AtriToken;
 
 typedef struct {
     AtriSource source;
     size_t offset;
+    const AtriSyntaxScope *scope;
 } AtriLexer;
 
 /* 仅解码已由 Lexer 验证的字面量内容；cursor 从开引号后开始，调用方控制闭引号边界。 */

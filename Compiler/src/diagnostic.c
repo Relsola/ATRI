@@ -37,20 +37,38 @@ AtriLocation atri_source_location(AtriSource source, size_t offset) {
     return location;
 }
 
-void atri_print_diagnostic(FILE *stream, AtriSource source,
-                           AtriDiagnostic diagnostic) {
-    AtriLocation location = atri_source_location(source, diagnostic.span.start);
-    fprintf(stream, "%s:%zu:%zu: error: %s\n",
-            source.name, location.line, location.column, diagnostic.message);
+void atri_diagnostic_note(AtriDiagnostic *d, AtriSpan span, const char *message) {
+    if (d->note_count == sizeof(d->notes) / sizeof(*d->notes)) {
+        ++d->omitted;
+        return;
+    }
+    d->notes[d->note_count++] = (AtriDiagnosticLabel){span, message};
+}
+
+void atri_print_label(FILE *stream, AtriSource source, AtriSpan span, const char *level,
+                      const char *message, const char *detail) {
+    AtriLocation location = atri_source_location(source, span.start);
+    fprintf(stream, "%s:%zu:%zu: %s: %s%s%s\n", source.name, location.line, location.column,
+            level, message, *detail ? ": " : "", detail);
     fwrite(source.text + location.line_start, 1,
            location.line_end - location.line_start, stream);
     fputc('\n', stream);
     for (size_t i = location.line_start;
-         i < diagnostic.span.start && i < location.line_end; ++i) {
+         i < span.start && i < location.line_end; ++i) {
         unsigned char c = (unsigned char)source.text[i];
         if ((c & 0xC0) != 0x80) {
             fputc(c == '\t' ? '\t' : ' ', stream);
         }
     }
-    fputs("^\n", stream);
+    fputc('^', stream);
+    for (size_t i = span.start; i < span.end && i < location.line_end; ++i) {
+        if (i != span.start && ((unsigned char)source.text[i] & 0xC0) != 0x80) {
+            fputc('~', stream);
+        }
+    }
+    fputc('\n', stream);
+}
+
+void atri_print_diagnostic(FILE *stream, AtriSource source, AtriDiagnostic diagnostic) {
+    atri_program_diagnostic(stream, source, &(AtriProgram){0}, diagnostic);
 }

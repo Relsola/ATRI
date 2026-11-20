@@ -1,0 +1,17 @@
+fn emit(factor: i32) -> *u8 {
+    if (factor == 2) { return "1 + #run triple(1)"; }
+    return "GENERATOR_ONLY_SENTINEL";
+}
+
+@math
+fn main() -> i32 {
+    base: i32 := 4;
+    sum: i32 = #run -> i32 {
+        total: i32;
+        for (i: i32 = 0; i < base; i += 1) { total += i; }
+        return total;
+    };
+    return sum %% (2 * #insert #run emit(2));
+}
+
+fn triple(n: i32) -> i32 { return n * 3; }

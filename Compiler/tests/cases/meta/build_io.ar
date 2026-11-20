@@ -1,0 +1,29 @@
+struct FILE;
+#extern(C) fn fopen(path: *u8, mode: *u8) -> *FILE;
+#extern(C) fn fputc(c: i32, file: *FILE) -> i32;
+#extern(C) fn fgetc(file: *FILE) -> i32;
+#extern(C) fn fclose(file: *FILE) -> i32;
+
+fn record(c: i32) -> i32 {
+    file: *FILE = fopen("trace.bin", "ab");
+    if (file == null) { return 0; }
+    fputc(c, file);
+    fclose(file);
+    return c;
+}
+
+fn emit(path: *u8) -> *u8 {
+    // This lexical obligation is shared by both inserts and final lowering.
+    stamp: i32 := record(65);
+    if (record(66) == 66 && stamp == 65) {
+        file: *FILE = fopen(path, "rb");
+        if (file != null) {
+            first: i32 = fgetc(file);
+            fclose(file);
+            if (first == 90) { return "4"; }
+        }
+    }
+    return "0";
+}
+
+fn main() -> i32 { return #insert #run emit("input.bin") + #insert #run emit("input.bin"); }

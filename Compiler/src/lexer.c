@@ -48,14 +48,32 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
     size_t length = lexer->source.length;
     for (;;) {
         while (lexer->offset < length && is_space((unsigned char)text[lexer->offset])) { ++lexer->offset; }
-        if (lexer->offset + 1 >= length || text[lexer->offset] != '/' || text[lexer->offset+1] != '/') { break; }
-        while (lexer->offset < length && text[lexer->offset] != '\n' && text[lexer->offset] != '\r') { ++lexer->offset; }
+        if (lexer->offset + 1 >= length || text[lexer->offset] != '/') { break; }
+        if (text[lexer->offset+1] == '/') {
+            while (lexer->offset < length && text[lexer->offset] != '\n' && text[lexer->offset] != '\r') { ++lexer->offset; }
+        } else if (text[lexer->offset+1] == '*') {
+            size_t comment = lexer->offset;
+            lexer->offset += 2;
+            while (lexer->offset + 1 < length && !(text[lexer->offset] == '*' && text[lexer->offset+1] == '/')) { ++lexer->offset; }
+            if (lexer->offset + 1 >= length) {
+                lexer->offset = length;
+                return error_token(lexer,comment,diagnostic,"unterminated block comment");
+            }
+            lexer->offset += 2;
+        } else { break; }
     }
     size_t start = lexer->offset;
     if (start == length) {
         return token(ATRI_TOKEN_EOF, start, start);
     }
 
+    if (lexer->scope && lexer->scope->count) {
+        const AtriOperator *op = atri_match_operator(lexer->scope,text+start,length-start);
+        if (op) {
+            lexer->offset += op->size;
+            return (AtriToken){.kind=ATRI_TOKEN_CUSTOM,.span={start,lexer->offset},.custom=op};
+        }
+    }
     unsigned char c = (unsigned char)text[lexer->offset++];
     if (is_identifier_start(c)) {
         while (lexer->offset < length &&
@@ -112,13 +130,14 @@ AtriToken atri_lexer_next(AtriLexer *lexer, AtriDiagnostic *diagnostic) {
     }
 
     switch (c) {
+        case '@': return token(ATRI_TOKEN_ANNOTATION, start, lexer->offset);
         case '#': {
             while (lexer->offset < length && is_space((unsigned char)text[lexer->offset])) { ++lexer->offset; }
             size_t name = lexer->offset;
             while (lexer->offset < length && is_identifier_part((unsigned char)text[lexer->offset])) { ++lexer->offset; }
             size_t count = lexer->offset-name;
             static const struct { const char *name; AtriTokenKind kind; } directives[] = {
-                {"run", ATRI_TOKEN_RUN}, {"extern", ATRI_TOKEN_EXTERN}, {"through", ATRI_TOKEN_THROUGH}
+                {"insert", ATRI_TOKEN_INSERT}, {"keyword", ATRI_TOKEN_KEYWORD}, {"run", ATRI_TOKEN_RUN}, {"extern", ATRI_TOKEN_EXTERN}, {"through", ATRI_TOKEN_THROUGH}
             };
             for (size_t i = 0; i < sizeof(directives)/sizeof(*directives); ++i) {
                 if (count == strlen(directives[i].name) && !memcmp(text+name, directives[i].name, count)) {

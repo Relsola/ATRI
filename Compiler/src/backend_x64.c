@@ -132,7 +132,7 @@ static bool frame_layout(const AtriIRProgram *p, const AtriIRFunction *f, size_t
     for (size_t i = 0; i < f->instruction_count; ++i) {
         const AtriIRInst *v = &f->instructions[i];
         if (v->kind != ATRI_IR_CALL) { continue; }
-        if (v->argument_count > 256) { *d = (AtriDiagnostic){v->span, "x64 prototype supports at most 256 call arguments"}; return false; }
+        if (v->argument_count > 256) { *d = (AtriDiagnostic){.span = v->span, .message = "x64 prototype supports at most 256 call arguments"}; return false; }
         size_t bytes = call_argument_area(p, v);
         for (size_t a = 0; a < v->argument_count; ++a) {
             AtriIRType type = f->instructions[f->arguments[v->first_argument+a]].type;
@@ -154,13 +154,13 @@ static bool frame_layout(const AtriIRProgram *p, const AtriIRFunction *f, size_t
             if (!width) { width = 1; }
             needed = (needed + alignment - 1) / alignment * alignment;
             slots[i] = needed; needed += width;
-            if (needed >= 4096) { *d = (AtriDiagnostic){f->name, "x64 prototype stack frame is too large"}; return false; }
+            if (needed >= 4096) { *d = (AtriDiagnostic){.span = f->name, .message = "x64 prototype stack frame is too large"}; return false; }
         }
     }
     /* call 压入 8 字节返回地址，入口 RSP 为 8 mod 16；非空帧取 8 mod 16，使调用前恢复 16 字节对齐。 */
     *frame = needed == 0 ? 0 : ((needed + 8 + 15) / 16) * 16 - 8;
     /* 大帧需要栈探测；当前未生成该代码，因此不能仅增大这里的上限。 */
-    if (*frame >= 4096) { *d = (AtriDiagnostic){f->name, "x64 prototype requires a stack frame smaller than 4096 bytes"}; return false; }
+    if (*frame >= 4096) { *d = (AtriDiagnostic){.span = f->name, .message = "x64 prototype requires a stack frame smaller than 4096 bytes"}; return false; }
     return true;
 }
 static AtriId fallthrough_block(const AtriIRFunction *f, size_t terminator) {
@@ -233,7 +233,8 @@ static void emit_bytes(FILE *s, const unsigned char *bytes, size_t length) {
 }
 /* reachable 为 NULL 时保留全部定义，供没有 main 的库源码使用。 */
 static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *p,
-                               const bool *reachable, AtriDiagnostic *d) {
+                               const AtriLiveSymbols *live, AtriDiagnostic *d) {
+    const bool *reachable = live->functions;
     /* 先检查全部保留函数的目标限制，避免后面的函数失败时留下残缺汇编。 */
     for (size_t n = 0; n < p->function_count; ++n) {
         if (reachable != NULL && !reachable[n]) {
@@ -241,7 +242,7 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
         }
         const AtriIRFunction *f = &p->functions[n];
         if (is_main(source, f) && f->return_type != ATRI_IR_I32) {
-            *d = (AtriDiagnostic){f->name, "hosted main must return i32 for C startup"}; return false;
+            *d = (AtriDiagnostic){.span = f->name, .message = "hosted main must return i32 for C startup"}; return false;
         }
         if (f->external_c) {
             for (size_t defined = 0; defined < p->function_count; ++defined) {
@@ -252,17 +253,17 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
                 char generated[64];
                 int length = snprintf(generated, sizeof(generated), "atri_fn_%zu", defined);
                 if (f->name.end-f->name.start == (size_t)length && memcmp(source.text+f->name.start, generated, (size_t)length) == 0) {
-                    *d = (AtriDiagnostic){f->name, "extern(C) symbol collides with a generated function symbol"}; return false;
+                    *d = (AtriDiagnostic){.span = f->name, .message = "extern(C) symbol collides with a generated function symbol"}; return false;
                 }
             }
             continue;
         }
         if (is_main(source, f) && (f->parameter_count != 0 || f->return_type != ATRI_IR_I32)) {
-            *d = (AtriDiagnostic){f->name, "this prototype requires main() -> i32 without parameters"}; return false;
+            *d = (AtriDiagnostic){.span = f->name, .message = "this prototype requires main() -> i32 without parameters"}; return false;
         }
         size_t frame;
         size_t *slots = calloc(f->instruction_count+1, sizeof(*slots));
-        if (slots == NULL) { *d = (AtriDiagnostic){f->name, "out of memory"}; return false; }
+        if (slots == NULL) { *d = (AtriDiagnostic){.span = f->name, .message = "out of memory"}; return false; }
         bool ok = frame_layout(p, f, slots, &frame, d); free(slots);
         if (!ok) return false;
     }
@@ -271,7 +272,7 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
         fputs(".data\n", s);
         for (size_t i = 0; i < p->global_count; ++i) {
             const AtriIRGlobal *g = &p->globals[i];
-            if (g->constant) { continue; }
+            if (g->constant || (live->globals && !live->globals[i])) { continue; }
             if (atri_ir_is_aggregate(g->type)) {
                 fprintf(s, ".balign %zu\n.Latri_global_%zu:\n", atri_ir_type_align(p, g->type), i);
                 /* 零大小对象保留一个地址锚点，不改变语言可见的 sizeof。 */
@@ -288,6 +289,7 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
     if (p->string_count) {
         fputs(".section .rdata,\"dr\"\n", s);
         for (size_t n = 0; n < p->string_count; ++n) {
+            if (live->strings && !live->strings[n]) { continue; }
             fprintf(s, ".Latri_string_%zu:\n", n);
             emit_bytes(s, p->strings[n].bytes, p->strings[n].length+1);
         }
@@ -302,7 +304,7 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
             fputs(".extern ", s); symbol(s, source, p, n); fputc('\n', s); continue;
         }
         size_t *slots = calloc(f->instruction_count+1, sizeof(*slots));
-        if (slots == NULL) { *d = (AtriDiagnostic){f->name, "out of memory"}; return false; }
+        if (slots == NULL) { *d = (AtriDiagnostic){.span = f->name, .message = "out of memory"}; return false; }
         size_t frame;
         if (!frame_layout(p, f, slots, &frame, d)) { free(slots); return false; }
         fputs("\n.globl ", s); symbol(s, source, p, n);
@@ -493,41 +495,9 @@ bool atri_emit_x64(FILE *s, AtriSource source, const AtriIRProgram *p, AtriDiagn
     if (!atri_ir_verify(p, d)) {
         return false;
     }
-    AtriId entry = SIZE_MAX;
-    for (size_t n = 0; n < p->function_count; ++n) {
-        if (!p->functions[n].external_c && is_main(source, &p->functions[n])) {
-            entry = n;
-            break;
-        }
-    }
-    if (entry == SIZE_MAX) {
-        return emit_reachable_x64(s, source, p, NULL, d);
-    }
-    bool *reachable = calloc(p->function_count, sizeof(*reachable));
-    AtriId *pending = malloc(p->function_count * sizeof(*pending));
-    if (reachable == NULL || pending == NULL) {
-        free(reachable);
-        free(pending);
-        *d = (AtriDiagnostic){p->functions[entry].name, "out of memory during function reachability analysis"};
-        return false;
-    }
-    /* 按优化后剩余的调用边遍历；入队即标记，每个函数只扫描一次，递归环不会反复入队。
-     * 只筛选输出，不压紧函数数组，以保持 call.callee 及临时符号编号稳定。 */
-    size_t pending_count = 1;
-    pending[0] = entry;
-    reachable[entry] = true;
-    for (size_t next = 0; next < pending_count; ++next) {
-        const AtriIRFunction *f = &p->functions[pending[next]];
-        for (size_t i = 0; i < f->instruction_count; ++i) {
-            const AtriIRInst *inst = &f->instructions[i];
-            if (inst->kind == ATRI_IR_CALL && !reachable[inst->callee]) {
-                reachable[inst->callee] = true;
-                pending[pending_count++] = inst->callee;
-            }
-        }
-    }
-    free(pending);
-    bool ok = emit_reachable_x64(s, source, p, reachable, d);
-    free(reachable);
+    AtriLiveSymbols live = {0};
+    if (!atri_runtime_symbols(source, p, &live, d)) { return false; }
+    bool ok = emit_reachable_x64(s, source, p, &live, d);
+    atri_live_symbols_destroy(&live);
     return ok;
 }

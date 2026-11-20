@@ -2,7 +2,7 @@
 #include "array.h"
 
 static bool diagnostic(AtriDiagnostic *d, AtriSpan span, const char *message) {
-    *d = (AtriDiagnostic){span, message}; return false;
+    *d = (AtriDiagnostic){.span = span, .message = message}; return false;
 }
 static bool emit_fold(const AtriIRProgram *p, AtriIRFunction *out, AtriIRInst inst, AtriId *id, AtriDiagnostic *d) {
     if (inst.kind == ATRI_IR_C_PROMOTE && out->instructions[inst.left].kind == ATRI_IR_CONST) {

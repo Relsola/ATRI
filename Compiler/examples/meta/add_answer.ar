@@ -1,0 +1,10 @@
+#extern(C) fn strcmp(a: *u8, b: *u8) -> i32;
+
+fn atri_on_decl_v1(id: u64, kind: u32, module: *u8, name: *u8,
+                   source: *u8, replacement: **u8, injection: **u8) -> i32 {
+    if (strcmp(name, "main") == 0) {
+        *replacement = "fn main() -> i32 { return #run answer(); }";
+        *injection = "fn answer() -> i32 { return 42; }";
+    }
+    return 0;
+}

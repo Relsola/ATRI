@@ -2,41 +2,44 @@
 
 Compiler 是 ATRI 大型个人项目的基础子项目，也是当前建设的第一步，目标是实现一门以 DOP（面向数据编程）为核心取向、偏底层的强类型语言及可持续自举的原生编译器。
 
-首个目标平台为 Windows x86-64，Stage 0 使用 C23 实现。从源码解析、类型检查、编译期求值和 IR 验证到 x64 汇编输出，当前支持八种定宽整数、bool、多级数据指针、整数枚举、固定数组、结构体和无标签 union。已支持相对 `.ar` 导入、共享全局存储、聚合静态初始化、循环、`switch`、`defer` 和 `#run` 编译期函数调用。`#run` 代码块、编译期 AST 修改和浮点运算等尚待实现。
+首个目标平台为 Windows x86-64，Stage 0 使用 C23 实现。从源码解析、类型检查、编译期求值和 IR 验证到 x64 汇编输出，当前支持八种定宽整数、bool、多级数据指针、整数枚举、固定数组、结构体和无标签 union。已支持相对 `.ar` 导入、共享全局存储、聚合静态初始化、循环、`switch`、`defer` 和 `#run` 编译期函数调用。现支持编译期块、声明监听器、注解中缀运算符及原位源码展开。浮点运算仍待实现。
 
 已增加 C 兼容 `*u8`、静态零结尾字符串字面量和 `#extern(C)` 外部调用，可以通过 puts/printf 打印。已支持当前类型范围内的 C 可变参数调用，并用 void 返回、*void、opaque FILE 和数据指针 cast 接通文件读写。稳定 ABI 目标与 C 一致，内置 string 暂缓；完整范围和限制见[外部调用子集](NEXT/parser_subset_v0_1.md#c-字符串与外部调用)。
 
 ## 运行整数编译原型
 
+在 Windows x64 安装 CMake、Ninja、Clang 和可用的 Windows SDK 链接环境，然后在 `Compiler/` 运行以下命令。`--exe` 会调用外部工具完成汇编和链接。
+
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ctest --test-dir build --output-on-failure
-.\build\atri-parse.exe .\examples\main.ar
-.\build\atri-cc.exe --emit-ir-before-opt .\examples\main.ar
-.\build\atri-cc.exe --emit-ir .\examples\main.ar
-.\build\atri-cc.exe -O0 --emit-ir .\examples\constants.ar
-.\build\atri-cc.exe --emit-ir .\examples\pointers.ar
-.\build\atri-cc.exe --emit-ir .\examples\pointer_arithmetic.ar
-.\build\atri-cc.exe --emit-ir .\examples\control_flow.ar
-.\build\atri-cc.exe -S -o .\build\main.s .\examples\main.ar
-clang .\build\main.s -o .\build\main.exe
+.\build\atri-cc.exe --exe -o build/main.exe examples/main.ar
 .\build\main.exe
 $LASTEXITCODE # 3
 ```
 
-普通变量写作 `a: i32 = 1;`，省略初始化器时默认零初始化；编译期常量写作 `n: i32 := add(1, 2);`，无法在编译期求值时必须报错。[常量示例](examples/constants.ar)在 -O0 下也直接返回 3，不依赖内联。全角分号 `；` 会报错。完整范围、已接受的整数运算规则和当前后端限制见[整数编译原型](NEXT/parser_subset_v0_1.md)。
+`--emit-ast` 查看展开和改写后的语法树，`--emit-ir-before-opt` 查看编译期求值后的寄存器字节码，`-S` 输出汇编，`-c` 输出 COFF。默认 `-O0` 把字节码直接翻译为 x64 汇编。`-O1` 在 LLVM IR 上运行 ATRI 自研优化，依赖 Clang 同目录的 `LLVM-C.dll`。`-O2` 使用 LLVM 标准优化管线。[按模块阅读编译器](docs/README.md)
 
-打印示例见 [hello.ar](examples/hello.ar)：
+`--meta` 可重复指定，插件按参数顺序接收声明。下面的示例用 `@math` 插件改写运算符，执行编译期循环，并展开生成的源码。[示例源码、执行顺序与链路图](docs/metaprograms.md)
 
 ```powershell
-.\build\atri-cc.exe -S -o .\build\hello.s .\examples\hello.ar
-clang .\build\hello.s -o .\build\hello.exe
+.\build\atri-cc.exe --meta examples/meta/operators.ar --exe -o build/pipeline.exe examples/meta/pipeline.ar
+.\build\pipeline.exe
+$LASTEXITCODE # 11
+```
+
+普通变量写作 `a: i32 = 1;`，省略初始化器时默认零初始化；编译期常量写作 `n: i32 := add(1, 2);`，无法在编译期求值时必须报错。[常量示例](examples/constants.ar)在 -O0 下也直接返回 3，不依赖内联。全角分号 `；` 会报错。完整范围、已接受的整数运算规则和当前后端限制见[整数编译原型](NEXT/parser_subset_v0_1.md)。
+
+打印示例导入 `basic` 模块并调用 C 函数 `puts`。[hello.ar](examples/hello.ar)
+
+```powershell
+.\build\atri-cc.exe --exe -o build/hello.exe examples/hello.ar
 .\build\hello.exe
 # import "basic"
 ```
 
-`-o` 指定文本输出文件名，输出格式由所选模式决定。上面的命令先生成汇编，再使用 Clang 的默认 C 启动代码及运行库完成链接。`build.bat` 是本地试验脚本。C 声明和字面量规则见[语言规范第 5.5/13 节](NEXT/language_spec_v0_1.md#13-c-互操作与执行环境)。
+`-o` 指定输出文件名，输出格式由所选模式决定。外部函数可用 `#extern(C)` 声明。[C 互操作规则](NEXT/language_spec_v0_1.md#13-c-互操作与执行环境)
 
 数组写作 `data: [4]u8 = {1, 2};`，可声明在局部或模块顶层。省略的元素按类型默认初始化，多维数组支持 `mat[i, j]`。`a: i32 := #run max(1, 2);` 在 -O0/-O1 下均生成常量 2。`#run f();` 也可独立执行。详见[可执行回归用例](tests/cases/run_constants.ar)和[实现子集](NEXT/parser_subset_v0_1.md#固定数组的当前实现)。
 
@@ -52,7 +55,7 @@ clang .\build\read_file.s -o .\build\read_file.exe
 
 可变参数目前覆盖已支持整数、数据指针和 C 兼容普通结构体，i8/u8/i16/u16/bool 尾参提升为 i32；浮点、va_list/va_arg 定义端及完整 C ABI 仍待实现。FILE 只作 opaque 指针使用，CRT 的分配、缓冲和 I/O 有实际成本，文件错误及关闭由调用方处理。准确边界见[实现子集](NEXT/parser_subset_v0_1.md#c-可变参数opaque-file-与文件读取)。
 
-`--emit-ir-before-opt` 输出完成编译期求值后的 IR。`a: i32 = #run max(1, 2);` 的初值在编译期求得，`a` 仍可在运行期赋值。使用 `:=` 可建立编译期常量。求值记录及生成代码视图仍待设计，见[编译期观察与调试](NEXT/language_spec_v0_1.md#125-编译期执行的观察与调试)。
+`--emit-ir-before-opt` 输出完成编译期求值后的 IR。`a: i32 = #run max(1, 2);` 的初值在编译期求得，`a` 仍可在运行期赋值。使用 `:=` 可建立编译期常量。求值记录及生成代码视图仍待设计，见[编译期观察与调试](NEXT/language_spec_v0_1.md#125-观察与诊断)。
 
 基础整数支持十进制/二进制/十六进制与数字分隔符、位运算/移位和复合赋值，见 [basic_types.ar](examples/basic_types.ar)。不再提供 char：单引号字节字面量为 u8，可直接算术/索引；字符串字面量为 *u8 并补终止零。\xHH 固定两位，不解析八进制；C 互操作沿用最终字节表示，浮点和内置 string 继续暂缓。
 
@@ -60,10 +63,12 @@ clang .\build\read_file.s -o .\build\read_file.exe
 
 枚举示例见 [enum_switch.ar](examples/enum_switch.ar)：`Color :: enum { Red, Green, Count, }` 默认使用 i32，成员是普通整数，`1 + Color::Red`、数组长度和索引可直接使用；`Flags :: enum(bit8)` 自动生成 1、2、4，变量/计算结果仍允许 0。switch 选择值只求值一次，case 常量在编译期求得，非空分支默认结束，`#through;` 显式进入下一分支；case 不强制花括号。
 
-编译器指定能力采用 `#run`、`#extern(C)` 和 `#through`。`#run` 的调用形式仅接收直接函数调用。`#run { ... }` 和 `#run -> Type { ... }` 分别定义无结果块与显式 `return` 的值块，两种写法当前均诊断尚未实现。可运行的枚举和分支示例见 [enum_switch.ar](examples/enum_switch.ar)。
+`#run f(args)` 强制在编译期执行一次直接调用。`#run { ... }` 执行无结果块，`#run -> Type { ... }` 通过 `return` 交回值。`#insert #run emit(...)` 将生成的文本原位拼回源码并重新解析。[编译期规则](NEXT/language_spec_v0_1.md#12-编译期执行与-ast-元编程)
 
 ## 文档
 
+- [Stage 0 编译器实现导读：模块、编译链路与关键算法](docs/README.md)
+- [声明事件、编译期 VM 与 O0/O1/O2 原生输出](docs/metaprograms.md)
 - [当前进度与验证记录](NEXT/progress_v0_1.md)
 - [测试用例与预期写法](tests/README.md)
 - [开发约定：代码风格、工具与验证](docs/development.md)

@@ -1,10 +1,13 @@
 #include "frontend.h"
 #include "lexer.h"
+#include "source_map.h"
 #include "array.h"
+#include "meta_plugin.h"
 
 typedef struct {
     AtriLexer lexer;
     AtriToken current;
+    size_t previous_end;
     AtriProgram program;
     AtriDiagnostic *diagnostic;
     bool failed;
@@ -16,14 +19,17 @@ typedef struct {
 } Parser;
 
 static bool fail(Parser *p, const char *message) {
-    if (!p->failed) *p->diagnostic = (AtriDiagnostic){p->current.span, message};
+    if (!p->failed && p->current.kind != ATRI_TOKEN_ERROR) {
+        *p->diagnostic = (AtriDiagnostic){.span = p->current.span, .message = message};
+    }
     p->failed = true;
     return false;
 }
 static void advance(Parser *p) {
     if (p->failed) return;
+    p->previous_end = p->current.span.end;
     p->current = atri_lexer_next(&p->lexer, p->diagnostic);
-    if (p->current.kind == ATRI_TOKEN_ERROR) p->failed = true;
+    /* 前瞻可能属于下一条声明，等真正消费该位置时才报告词法错误。 */
 }
 static bool expect(Parser *p, AtriTokenKind kind, const char *message) {
     if (p->failed) return false;
@@ -33,10 +39,11 @@ static bool expect(Parser *p, AtriTokenKind kind, const char *message) {
 }
 static bool append_expr(Parser *p, AtriExpr e, AtriId *id) {
     /* 左结合长链不会显著增加解析递归深度，但仍会生成深树；单独限制树高以保护后续遍历。 */
+    if (e.custom && !p->program.unresolved_operator.end) { p->program.unresolved_operator = e.text; }
     e.tree_depth = 1;
     if (e.kind == ATRI_EXPR_UNARY || e.kind == ATRI_EXPR_BINARY ||
         e.kind == ATRI_EXPR_ADDRESS || e.kind == ATRI_EXPR_DEREFERENCE || e.kind == ATRI_EXPR_FIELD ||
-        e.kind == ATRI_EXPR_INDEX || e.kind == ATRI_EXPR_CONDITIONAL || e.kind == ATRI_EXPR_RUN || e.kind == ATRI_EXPR_CAST)
+        e.kind == ATRI_EXPR_INDEX || e.kind == ATRI_EXPR_CONDITIONAL || (e.kind == ATRI_EXPR_RUN && !e.run_block) || e.kind == ATRI_EXPR_CAST)
         e.tree_depth = p->program.expressions[e.left].tree_depth + 1;
     if ((e.kind == ATRI_EXPR_BINARY || e.kind == ATRI_EXPR_INDEX || e.kind == ATRI_EXPR_CONDITIONAL) && p->program.expressions[e.right].tree_depth + 1 > e.tree_depth)
         e.tree_depth = p->program.expressions[e.right].tree_depth + 1;
@@ -61,6 +68,8 @@ static bool append_expr(Parser *p, AtriExpr e, AtriId *id) {
 }
 static bool parse_expression(Parser *p, int minimum, AtriId *result);
 static bool parse_type(Parser *p, AtriSpan *span, const char *message);
+
+static bool parse_block(Parser *p, AtriId *id);
 
 static bool parse_primary(Parser *p, AtriId *result) {
     AtriToken token = p->current;
@@ -88,7 +97,17 @@ static bool parse_primary(Parser *p, AtriId *result) {
     }
     if (token.kind == ATRI_TOKEN_RUN) {
         advance(p);
-        if (p->current.kind == ATRI_TOKEN_LEFT_BRACE || p->current.kind == ATRI_TOKEN_ARROW) { return fail(p, "#run code blocks are reserved but not implemented yet"); }
+        if (p->current.kind == ATRI_TOKEN_LEFT_BRACE || p->current.kind == ATRI_TOKEN_ARROW) {
+            AtriExpr run = {.kind = ATRI_EXPR_RUN, .run_block = true, .span.start = token.span.start};
+            if (p->current.kind == ATRI_TOKEN_ARROW) {
+                advance(p);
+                if (!parse_type(p, &run.text, "expected a result type after #run ->")) { return false; }
+            }
+            if (!parse_block(p, &run.left)) { return false; }
+            run.span.end = p->program.blocks[run.left].span.end;
+            run.alternative = p->program.run_block_count++;
+            return append_expr(p, run, result);
+        }
         if (p->current.kind != ATRI_TOKEN_IDENTIFIER) { return fail(p, "#run requires a direct function call"); }
         AtriId operand;
         if (!parse_primary(p, &operand)) { return false; }
@@ -150,10 +169,12 @@ initializer_done:
         return !p->failed && append_expr(p, (AtriExpr){
             .kind = ATRI_EXPR_STRING, .span = token.span, .text = token.span}, result);
     }
-    if (token.kind == ATRI_TOKEN_IDENTIFIER) {
+    if (token.kind == ATRI_TOKEN_IDENTIFIER || token.kind == ATRI_TOKEN_KEYWORD) {
         advance(p);
         if (p->failed) return false;
-        AtriExpr e = {.kind = ATRI_EXPR_NAME, .span = token.span, .text = token.span};
+        AtriExpr e = {.kind = ATRI_EXPR_NAME, .span = token.span, .text = token.span,
+            .keyword = token.kind == ATRI_TOKEN_KEYWORD};
+        if (e.keyword && p->current.kind != ATRI_TOKEN_LEFT_PAREN) { return fail(p, "#keyword requires a node handle in parentheses"); }
         if (p->current.kind == ATRI_TOKEN_SCOPE) {
             e.qualifier = token.span;
             advance(p);
@@ -207,7 +228,10 @@ cleanup:
     if (token.kind == ATRI_TOKEN_LEFT_PAREN) {
         advance(p);
         if (!parse_expression(p, 0, result)) return false;
-        return expect(p, ATRI_TOKEN_RIGHT_PAREN, "expected ')' after expression");
+        AtriSpan grouped = {token.span.start, p->current.span.end};
+        if (!expect(p, ATRI_TOKEN_RIGHT_PAREN, "expected ')' after expression")) { return false; }
+        p->program.expressions[*result].span = grouped;
+        return true;
     }
     if (token.kind == ATRI_TOKEN_MINUS || token.kind == ATRI_TOKEN_PLUS ||
         token.kind == ATRI_TOKEN_STAR || token.kind == ATRI_TOKEN_AMPERSAND || token.kind == ATRI_TOKEN_NOT || token.kind == ATRI_TOKEN_TILDE) {
@@ -216,12 +240,12 @@ cleanup:
         if (!parse_expression(p, 30, &operand)) return false;
         AtriExprKind kind = token.kind == ATRI_TOKEN_STAR ? ATRI_EXPR_DEREFERENCE :
                             token.kind == ATRI_TOKEN_AMPERSAND ? ATRI_EXPR_ADDRESS : ATRI_EXPR_UNARY;
-        return append_expr(p, (AtriExpr){.kind = kind,
+        return append_expr(p, (AtriExpr){.kind = kind, .text = token.span,
             .span = {token.span.start, p->program.expressions[operand].span.end},
             .op = token.kind == ATRI_TOKEN_NOT ? ATRI_NOT : token.kind == ATRI_TOKEN_TILDE ? ATRI_BIT_NOT : token.kind == ATRI_TOKEN_PLUS ? ATRI_ADD : ATRI_NEG,
             .left = operand}, result);
     }
-    return fail(p, "expected an integer expression, name, call or '('");
+    return fail(p, "expected an expression");
 }
 static int precedence(AtriTokenKind kind, AtriOp *op) {
     switch (kind) {
@@ -279,15 +303,16 @@ static bool parse_expression(Parser *p, int minimum, AtriId *result) {
             continue;
         }
         AtriOp op = ATRI_ADD;
-        int prec = precedence(p->current.kind, &op);
+        AtriToken symbol = p->current;
+        int prec = symbol.custom ? (int)symbol.custom->precedence : precedence(symbol.kind, &op);
         if (prec < minimum) break;
         advance(p);
         AtriId right;
-        if (!parse_expression(p, prec + 1, &right)) goto done;
+        if (!parse_expression(p, prec + !(symbol.custom && symbol.custom->right), &right)) goto done;
         AtriSpan span = {p->program.expressions[left].span.start,
                          p->program.expressions[right].span.end};
         if (!append_expr(p, (AtriExpr){.kind = ATRI_EXPR_BINARY,
-                .span = span, .op = op, .left = left, .right = right}, &left)) goto done;
+                .span = span, .text = symbol.span, .custom = symbol.custom != NULL, .op = op, .left = left, .right = right}, &left)) goto done;
     }
     if (minimum == 0 && p->current.kind == ATRI_TOKEN_QUESTION) {
         advance(p);
@@ -571,7 +596,8 @@ static bool parse_statement(Parser *p, AtriId *id) {
             advance(p); semicolon = true; break;
         default:
             if (!simple_statement(p, &s, true)) goto done;
-            semicolon = true; break;
+            semicolon = s.kind != ATRI_STMT_EXPR || !p->program.expressions[s.expression].run_block ||
+                p->current.kind == ATRI_TOKEN_SEMICOLON; break;
     }
     s.span.end = p->current.span.start;
     if (semicolon) {
@@ -707,12 +733,22 @@ static bool parse_enum(Parser *p, bool exported) {
     if (p->current.kind == ATRI_TOKEN_SEMICOLON) { advance(p); }
     return atri_append((void **)&p->program.enums, &p->program.enum_count, &p->enums_cap, sizeof(item), &item) || fail(p, "out of memory");
 }
-bool atri_parse_sources(AtriSource source, const AtriModule *modules, size_t count, AtriProgram *output, AtriDiagnostic *diagnostic) {
-    *output = (AtriProgram){0};
+static bool parse_range(AtriSource source, const AtriModule *modules, size_t count, size_t start, size_t *next,
+                        bool index_declarations, AtriProgram *output, AtriDiagnostic *diagnostic) {
     *diagnostic = (AtriDiagnostic){0};
-    Parser p = {.lexer = atri_lexer_create(source), .diagnostic = diagnostic};
-    size_t module = 0;
+    Parser p = {.lexer = atri_lexer_create(source), .diagnostic = diagnostic, .program = *output,
+        .functions_cap = output->function_count, .parameters_cap = output->parameter_count,
+        .statements_cap = output->statement_count, .expressions_cap = output->expression_count,
+        .arguments_cap = output->argument_count, .blocks_cap = output->block_count,
+        .block_statements_cap = output->block_statement_count, .array_types_cap = output->array_type_count,
+        .imports_cap = output->import_count, .globals_cap = output->global_count, .structs_cap = output->struct_count,
+        .fields_cap = output->field_count, .initializers_cap = output->initializer_count, .enums_cap = output->enum_count,
+        .variants_cap = output->variant_count, .cases_cap = output->case_count, .runs_cap = output->run_count};
+    size_t module = 0, declaration_capacity = output->declaration_count, annotation_capacity = output->annotation_count;
+    if (start) { p.lexer.offset = start; }
     if (count) { p.lexer.source.length = modules[0].span.end; }
+    AtriSyntaxScope scope = {0};
+    p.lexer.scope = &scope;
     advance(&p);
     while (!p.failed) {
         if (p.current.kind == ATRI_TOKEN_EOF) {
@@ -723,12 +759,30 @@ bool atri_parse_sources(AtriSource source, const AtriModule *modules, size_t cou
                 !memcmp(source.text+p.lexer.offset, "\xEF\xBB\xBF", 3)) { p.lexer.offset += 3; }
             advance(&p); continue;
         }
+        scope.count = 0;
+        AtriDeclaration declaration = {.span.start = p.current.span.start, .first_annotation = p.program.annotation_count};
+        while (p.current.kind == ATRI_TOKEN_ANNOTATION) {
+            advance(&p);
+            if (p.current.kind == ATRI_TOKEN_IDENTIFIER &&
+                !atri_activate_annotation(&scope, source, p.current.span, diagnostic)) { p.failed=true; break; }
+            if (p.current.kind == ATRI_TOKEN_IDENTIFIER && index_declarations) {
+                if (!atri_append((void **)&p.program.annotations, &p.program.annotation_count, &annotation_capacity,
+                                 sizeof(p.current.span), &p.current.span)) { fail(&p, "out of memory recording annotation"); break; }
+                ++declaration.annotation_count;
+            }
+            if (!expect(&p, ATRI_TOKEN_IDENTIFIER, "expected an annotation name after '@'")) { break; }
+        }
+        if (p.failed) { break; }
         bool exported = false;
         if (p.current.kind == ATRI_TOKEN_EXPORT) { exported = true; advance(&p); }
         if (enum_start(&p)) {
             if (!parse_enum(&p, exported)) { break; }
+            declaration.kind = ATRI_META_ENUM;
+            declaration.name = p.program.enums[p.program.enum_count-1].name;
         } else if (p.current.kind == ATRI_TOKEN_STRUCT || p.current.kind == ATRI_TOKEN_UNION) {
+            declaration.kind = p.current.kind == ATRI_TOKEN_STRUCT ? ATRI_META_STRUCT : ATRI_META_UNION;
             if (!parse_struct(&p, exported)) { break; }
+            declaration.name = p.program.structs[p.program.struct_count-1].name;
         } else if (p.current.kind == ATRI_TOKEN_IMPORT ||
             named_import_start(&p)) {
             if (exported) { fail(&p, "re-exporting imports is not supported"); break; }
@@ -742,6 +796,8 @@ bool atri_parse_sources(AtriSource source, const AtriModule *modules, size_t cou
             if (!expect(&p, ATRI_TOKEN_STRING, "expected a module path") ||
                 !expect(&p, ATRI_TOKEN_SEMICOLON, "expected ';' after import")) break;
             if (!atri_append((void **)&p.program.imports, &p.program.import_count, &p.imports_cap, sizeof(item), &item)) { fail(&p, "out of memory"); break; }
+            declaration.kind = ATRI_META_IMPORT;
+            declaration.name = item.name;
         } else if (p.current.kind == ATRI_TOKEN_RUN) {
             if (exported) { fail(&p, "#run execution statements cannot be exported"); break; }
             AtriStatement run = new_statement(&p);
@@ -750,11 +806,13 @@ bool atri_parse_sources(AtriSource source, const AtriModule *modules, size_t cou
             if (p.program.expressions[run.expression].kind != ATRI_EXPR_RUN) {
                 fail(&p, "expected a standalone #run expression"); break;
             }
-            run.span.end = p.current.span.end;
+            bool semi = !p.program.expressions[run.expression].run_block || p.current.kind == ATRI_TOKEN_SEMICOLON;
+            run.span.end = semi ? p.current.span.end : p.previous_end;
             AtriId id;
-            if (!expect(&p, ATRI_TOKEN_SEMICOLON, "expected ';' after #run expression") ||
+            if ((semi && !expect(&p, ATRI_TOKEN_SEMICOLON, "expected ';' after #run expression")) ||
                 !append_statement(&p, run, &id) || !atri_append((void **)&p.program.runs, &p.program.run_count,
                     &p.runs_cap, sizeof(id), &id)) { fail(&p, "cannot build top-level #run statement"); break; }
+            declaration.kind = ATRI_META_RUN;
         } else if (declaration_start(&p)) {
             AtriGlobal item = {.declaration = new_statement(&p), .exported = exported};
             if (!simple_statement(&p, &item.declaration, true)) { break; }
@@ -762,22 +820,52 @@ bool atri_parse_sources(AtriSource source, const AtriModule *modules, size_t cou
             if (!expect(&p, ATRI_TOKEN_SEMICOLON, "expected ';' after global declaration")) { break; }
             if (item.declaration.kind == ATRI_STMT_CONSTANT && item.declaration.expression == ATRI_NONE) { fail(&p, "compile-time constants require an initializer"); break; }
             if (!atri_append((void **)&p.program.globals, &p.program.global_count, &p.globals_cap, sizeof(item), &item)) { fail(&p, "out of memory"); break; }
+            declaration.kind = ATRI_META_GLOBAL;
+            declaration.name = item.declaration.name;
         } else {
             if (!parse_function(&p)) break;
             p.program.functions[p.program.function_count-1].exported = exported;
+            declaration.kind = ATRI_META_FUNCTION;
+            declaration.name = p.program.functions[p.program.function_count-1].name;
         }
+        declaration.span.end = p.previous_end;
+        if (index_declarations && !atri_append((void **)&p.program.declarations, &p.program.declaration_count,
+                                               &declaration_capacity, sizeof(declaration), &declaration)) {
+            fail(&p, "out of memory indexing declarations");
+            break;
+        }
+        if (next) { break; }
     }
-    if (p.failed) { atri_program_destroy(&p.program); return false; }
+    if (next) { *next = p.current.span.start; }
+    free(scope.ids);
     *output = p.program;
-    return true;
+    return !p.failed;
+}
+bool atri_parse_fragment(AtriSource source, AtriSpan span, AtriProgram *output, AtriDiagnostic *diagnostic) {
+    source.length = span.end;
+    return parse_range(source, NULL, 0, span.start, NULL, true, output, diagnostic);
+}
+bool atri_parse_next(AtriSource source, AtriSpan span, size_t *next, AtriProgram *output, AtriDiagnostic *diagnostic) {
+    source.length = span.end;
+    if (span.end-span.start >= 3 && !memcmp(source.text + span.start, "\xEF\xBB\xBF", 3)) { span.start += 3; }
+    return parse_range(source, NULL, 0, span.start, next, true, output, diagnostic);
+}
+bool atri_parse_sources(AtriSource source, const AtriModule *modules, size_t count, bool index_declarations,
+                        AtriProgram *output, AtriDiagnostic *diagnostic) {
+    *output = (AtriProgram){0};
+    if (parse_range(source, modules, count, 0, NULL, index_declarations, output, diagnostic)) { return true; }
+    atri_program_destroy(output);
+    return false;
 }
 bool atri_parse(AtriSource source, AtriProgram *output, AtriDiagnostic *diagnostic) {
-    return atri_parse_sources(source, NULL, 0, output, diagnostic);
+    return atri_parse_sources(source, NULL, 0, false, output, diagnostic);
 }
 void atri_program_destroy(AtriProgram *p) {
+    free(p->declarations); free(p->annotations);
     free(p->enums); free(p->variants); free(p->cases); free(p->runs);
-    for (size_t i = 0; i < p->module_count; ++i) { free(p->modules[i].path); }
+    for (size_t i = 0; i < p->module_count; ++i) { free(p->modules[i].path); atri_source_map_destroy(p->modules[i].origins); }
     free(p->array_types); free(p->structs); free(p->fields); free(p->initializers);
+    if (p->owns_run_cache) { atri_run_cache_destroy(p->run_cache); }
     free(p->symbols); free(p->modules); free(p->imports); free(p->globals);
     free(p->functions); free(p->parameters); free(p->statements);
     free(p->expressions); free(p->arguments); free(p->blocks); free(p->block_statements);
@@ -797,7 +885,9 @@ static void dump_expr(FILE *s, AtriSource source, const AtriProgram *p, AtriId i
         write_span(s, source, e->text); fputc(')', s); return;
     }
     if (e->kind == ATRI_EXPR_RUN) {
-        fputs("#run ", s); dump_expr(s, source, p, e->left); return;
+        if (e->run_block) { write_span(s, source, e->span); }
+        else { fputs("#run ", s); dump_expr(s, source, p, e->left); }
+        return;
     }
     if (e->kind == ATRI_EXPR_INDEX) {
         dump_expr(s, source, p, e->left); fputc('[', s); dump_expr(s, source, p, e->right); fputc(']', s); return;
@@ -839,7 +929,9 @@ static void dump_expr(FILE *s, AtriSource source, const AtriProgram *p, AtriId i
     } else {
         const char *ops[] = {"+", "-", "*", "/", "%", "-", "==", "!=", "<", "<=", ">", ">=", "&&", "||", "!", "&", "|", "^", "~", "<<", ">>"};
         fputc('(', s); dump_expr(s, source, p, e->left);
-        fprintf(s, " %s ", ops[e->op]); dump_expr(s, source, p, e->right); fputc(')', s);
+        if (e->custom) { fputc(' ', s); write_span(s, source, e->text); fputc(' ', s); }
+        else { fprintf(s, " %s ", ops[e->op]); }
+        dump_expr(s, source, p, e->right); fputc(')', s);
     }
 }
 static void dump_statement(FILE *s, AtriSource source, const AtriProgram *p, AtriId id, int indent);
@@ -887,6 +979,16 @@ static void dump_statement(FILE *s, AtriSource source, const AtriProgram *p, Atr
 }
 void atri_dump_ast(FILE *s, AtriSource source, const AtriProgram *p) {
     fputs("Program\n", s);
+    for (size_t i = 0; i < p->declaration_count; ++i) {
+        const AtriDeclaration *decl = &p->declarations[i];
+        if (!decl->annotation_count) { continue; }
+        fputs("  Annotations", s);
+        for (size_t a = 0; a < decl->annotation_count; ++a) {
+            fputs(" @", s); write_span(s, source, p->annotations[decl->first_annotation + a]);
+        }
+        if (decl->name.end) { fputs(" on ", s); write_span(s, source, decl->name); }
+        fputc('\n', s);
+    }
     for (size_t i = 0; i < p->enum_count; ++i) {
         const AtriEnum *item = &p->enums[i];
         fprintf(s, "  %sEnum ", item->exported ? "Export " : ""); write_span(s, source, item->name);

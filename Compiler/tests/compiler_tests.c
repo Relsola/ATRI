@@ -149,7 +149,7 @@ static void pointers(void) {
     EXPECT_COMPILE_ERROR("fn f()->i32{p:*i32=null;*p=1;return 0;}", "null pointer");
     EXPECT_COMPILE_ERROR("fn f()->i32{x:i32=null;return x;}", "null requires a pointer");
     EXPECT_COMPILE_ERROR("fn f()->i32{p:*i32 :=null;return 0;}", "compile-time pointer constants");
-    EXPECT_COMPILE_ERROR("fn main()->i32{n:i32 :=f();return n;}fn f()->i32{x:i32;p:*i32=&x;*p=3;return x;}", "compile-time pointer operations");
+    expect_constant_i32("fn main()->i32{n:i32 :=f();return n;}fn f()->i32{x:i32;p:*i32=&x;*p=3;return x;}", 3);
 }
 static void pointer_arithmetic(void) {
     Compilation test = test_compile("pointer arithmetic types",
@@ -192,6 +192,18 @@ static void pointer_arithmetic(void) {
     expect_constant_i64("-17/5", -3); expect_constant_i64("-17%5", -2);
 }
 static void compile_time_constants(void) {
+    /* 第一个实参的帧先结束，第二个实参再挂起等待后定义常量；两次调用复用同一份字节码。 */
+    expect_constant_i32("fn main()->i32{return #run pair(next(1),next(2));}"
+        "fn pair(a:i32,b:i32)->i32{return a*10+b;}"
+        "fn next(n:i32)->i32{k:i32:=base;return n+k;}base:i32:=3;", 45);
+    expect_constant_i32("#extern(C)fn forbidden()->i32;"
+        "fn pick(ok:bool)->i32{if(ok){return 7;}return forbidden();}"
+        "fn main()->i32{return #run pick(true);}", 7);
+    expect_constant_i32("#run {} fn main()->i32{base:i32 :=5; return #run -> i32 {"
+        "x:i32=base;while(x<8){x+=1;}return x;};}", 8);
+    expect_constant_i32("fn main()->i32{base:i32 :=2; return #run -> i32 {"
+        "t:i32 :=base+3;return #run -> i32 {return t+base;};};}", 7);
+    EXPECT_COMPILE_ERROR("fn main()->i32{x:i32=2;return #run -> i32 {return x;};}", "runtime");
     expect_constant_i32("fn main()->i32{a:i32 :=1;b:i32 :=a+2;return b;}", 3);
     expect_constant_i32("fn main()->i32{n:i32 :=add(1,2);return n;}fn add(a:i32,b:i32)->i32{return a+b;}", 3);
     expect_constant_i32("fn main()->i32{n:i32 :=helper(3);return n;}"
@@ -276,7 +288,7 @@ static void c_calls_and_strings(void) {
     EXPECT_COMPILE_ERROR("#extern(C) fn ext()->i32;fn f()->i32{n:i32 :=ext();return n;}", "cannot execute at compile time");
     EXPECT_COMPILE_ERROR("#extern(C) fn ext()->i32;fn wrapper()->i32{ext();return 1;}"
         "fn f()->i32{n:i32 :=wrapper();return n;}", "cannot execute at compile time");
-    EXPECT_COMPILE_ERROR("#extern(C) fn puts(p:*u8)->i32;fn f()->i32{n:i32 :=puts(\"text\");return n;}", "cannot execute at compile time");
+    expect_constant_i32("#extern(C) fn strlen(p:*u8)->u64;fn main()->i32{n:i32 :=cast(i32,strlen(\"text\"));return n;}", 4);
 }
 static void arrays_and_run(void) {
     Compilation test = test_compile("#run and conditional",
@@ -584,7 +596,7 @@ static void union_layout_and_initialization(void) {
     EXPECT_COMPILE_ERROR("union U{x:i32;}a:U;b:U=a;", "aggregate calls and copies");
     EXPECT_COMPILE_ERROR("union U{x:i32;}fn f(p:*U)->i32{return p.x;}", "explicit dereference");
     EXPECT_COMPILE_ERROR("union U;x:U;", "opaque struct");
-    EXPECT_COMPILE_ERROR("union U{x:i32;}fn make()->U{return {.x=1};}fn f()->U{return #run make();}", "integer/bool result");
+    EXPECT_COMPILE_ERROR("union U{x:i32;}fn make()->U{return {.x=1};}fn f()->U{return #run make();}", "materializable");
     EXPECT_COMPILE_ERROR("union U{p:*u8;}u:U={.p=\"text\"};", "supports null only");
     EXPECT_COMPILE_ERROR("union U{x:i32;}fn f(a:U,b:U)->bool{return a==b;}", "equality");
 }

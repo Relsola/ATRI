@@ -2,7 +2,9 @@
 #define _XOPEN_SOURCE 700
 #endif
 #include "frontend.h"
+#include "meta.h"
 #include "lexer.h"
+#include "source_map.h"
 #include "array.h"
 #include <stdint.h>
 #include <string.h>
@@ -16,9 +18,46 @@ typedef struct {
     size_t text_count;
     size_t count, capacity, text_capacity, length;
     AtriDiagnostic *diagnostic;
+    const AtriSource *overlays;
+    size_t overlay_count;
 } Loader;
 
-static char *canonical(const char *path) {
+char *atri_read_stream(FILE *stream, size_t *length) {
+    size_t capacity = 4096;
+    char *text = malloc(capacity + 1);
+    if (text == NULL) {
+        return NULL;
+    }
+    *length = 0;
+    for (;;) {
+        if (*length == capacity) {
+            if (capacity > (SIZE_MAX - 1) / 2) {
+                free(text);
+                return NULL;
+            }
+            capacity *= 2;
+            char *grown = realloc(text, capacity + 1);
+            if (grown == NULL) {
+                free(text);
+                return NULL;
+            }
+            text = grown;
+        }
+        size_t count = fread(text + *length, 1, capacity - *length, stream);
+        *length += count;
+        if (count == 0) {
+            if (ferror(stream)) {
+                free(text);
+                return NULL;
+            }
+            break;
+        }
+    }
+    text[*length] = '\0';
+    return text;
+}
+
+char *atri_canonical_path(const char *path) {
 #ifdef _WIN32
     char *normalized = _fullpath(NULL, path, 0);
     if (!normalized) { return NULL; }
@@ -43,7 +82,11 @@ static char *canonical(const char *path) {
 #endif
 }
 
-static char *import_path(const char *parent, const char *text, AtriSpan span) {
+char *atri_import_path(const char *parent, const char *text, AtriSpan span) {
+    if (span.end <= span.start + 2 || text[span.start+1] == '/') { return NULL; }
+    for (size_t i = span.start + 1; i < span.end - 1; ++i) {
+        if (text[i] == '\\' || text[i] == ':') { return NULL; }
+    }
     size_t end = strlen(parent);
     while (end && parent[end-1] != '/' && parent[end-1] != '\\') { --end; }
     size_t length = span.end - span.start - 2;
@@ -57,7 +100,7 @@ static char *import_path(const char *parent, const char *text, AtriSpan span) {
 
 static bool load(Loader *loader, char *path, char *text, size_t length, size_t depth) {
     if (depth > 256 || length > SIZE_MAX-loader->length-1) {
-        *loader->diagnostic = (AtriDiagnostic){{0}, "module graph exceeds resource limits"};
+        *loader->diagnostic = (AtriDiagnostic){.span = {0}, .message = "module graph exceeds resource limits"};
         free(path); free(text); return false;
     }
     size_t index = loader->count;
@@ -74,30 +117,23 @@ static bool load(Loader *loader, char *path, char *text, size_t length, size_t d
     AtriLexer lexer = atri_lexer_create((AtriSource){path, text, length});
     for (;;) {
         AtriToken token = atri_lexer_next(&lexer, loader->diagnostic);
-        if (token.kind == ATRI_TOKEN_ERROR) {
-            loader->diagnostic->span.start += module.span.start;
-            loader->diagnostic->span.end += module.span.start;
-            return false;
-        }
+        /* 本次只发现 import。实际解析用声明自己的运算符表，并报告词法诊断。 */
+        if (token.kind == ATRI_TOKEN_ERROR) { continue; }
         if (token.kind == ATRI_TOKEN_EOF) { return true; }
         if (token.kind != ATRI_TOKEN_IMPORT) { continue; }
         if (!strcmp(path, "<stdin>")) {
-            *loader->diagnostic = (AtriDiagnostic){token.span, "relative imports require a source file path"}; return false;
+            *loader->diagnostic = (AtriDiagnostic){.span = token.span, .message = "relative imports require a source file path"}; return false;
         }
         token = atri_lexer_next(&lexer, loader->diagnostic);
         if (token.kind != ATRI_TOKEN_STRING) {
-            *loader->diagnostic = (AtriDiagnostic){{module.span.start + token.span.start, module.span.start + token.span.end}, "expected a module path"};
+            *loader->diagnostic = (AtriDiagnostic){.span = {module.span.start + token.span.start, module.span.start + token.span.end}, .message = "expected a module path"};
             return false;
         }
-        bool valid = token.span.end > token.span.start + 2 && text[token.span.start+1] != '/';
-        for (size_t i = token.span.start + 1; i < token.span.end - 1; ++i) {
-            if (text[i] == '\\' || text[i] == ':') { valid = false; }
-        }
-        char *candidate = valid ? import_path(path, text, token.span) : NULL;
-        char *resolved = candidate ? canonical(candidate) : NULL;
+        char *candidate = atri_import_path(path, text, token.span);
+        char *resolved = candidate ? atri_canonical_path(candidate) : NULL;
         free(candidate);
         if (!resolved) {
-            *loader->diagnostic = (AtriDiagnostic){{module.span.start + token.span.start, module.span.start + token.span.end}, "cannot resolve relative .ar module path"};
+            *loader->diagnostic = (AtriDiagnostic){.span = {module.span.start + token.span.start, module.span.start + token.span.end}, .message = "cannot resolve relative .ar module path"};
             return false;
         }
         bool found = false;
@@ -105,6 +141,18 @@ static bool load(Loader *loader, char *path, char *text, size_t length, size_t d
             if (!strcmp(resolved, loader->modules[i].path)) { found = true; break; }
         }
         if (found) { free(resolved); continue; }
+        for (size_t i = 0; i < loader->overlay_count; ++i) {
+            const AtriSource *overlay = &loader->overlays[i];
+            if (strcmp(resolved, overlay->name)) { continue; }
+            char *copy = malloc(overlay->length+1);
+            if (!copy) { free(resolved); return false; }
+            memcpy(copy, overlay->text, overlay->length);
+            copy[overlay->length] = 0;
+            if (!load(loader, resolved, copy, overlay->length, depth+1)) { return false; }
+            found = true;
+            break;
+        }
+        if (found) { continue; }
         FILE *file = fopen(resolved, "rb");
         if (!file) { free(resolved); return false; }
         size_t count = 0, capacity = 0;
@@ -174,6 +222,20 @@ AtriId atri_find_enum(AtriSource source, const AtriProgram *p, size_t offset, At
     return symbol && symbol->kind == ATRI_SYMBOL_ENUM ? symbol->target : ATRI_NONE;
 }
 
+AtriSpan atri_declaration_name(AtriSource source, const AtriProgram *p, AtriSpan name, AtriSpan qualifier) {
+    const AtriModuleSymbol *symbol = resolve_symbol(source, p, name.start, name, qualifier);
+    if (symbol) {
+        switch (symbol->kind) {
+            case ATRI_SYMBOL_FUNCTION: return p->functions[symbol->target].name;
+            case ATRI_SYMBOL_GLOBAL: return p->globals[symbol->target].declaration.name;
+            case ATRI_SYMBOL_STRUCT: return p->structs[symbol->target].name;
+            case ATRI_SYMBOL_ENUM: return p->enums[symbol->target].name;
+            case ATRI_SYMBOL_MODULE: break;
+        }
+    }
+    return (AtriSpan){0};
+}
+
 static AtriModuleSymbol module_symbol(AtriSource source, const AtriProgram *p, AtriSpan name,
                                       AtriSymbolKind kind, AtriId target, bool exported) {
     return (AtriModuleSymbol){.text = source.text+name.start, .length = name.end-name.start, .span = name,
@@ -186,7 +248,7 @@ typedef struct {
 
 static bool append_symbol(SymbolTable *table, AtriModuleSymbol symbol, AtriDiagnostic *d) {
     if (!atri_append((void **)&table->items, &table->count, &table->capacity, sizeof(symbol), &symbol)) {
-        *d = (AtriDiagnostic){symbol.span, "out of memory"};
+        *d = (AtriDiagnostic){.span = symbol.span, .message = "out of memory"};
         return false;
     }
     return true;
@@ -216,7 +278,7 @@ bool atri_prepare_symbols(AtriSource source, AtriProgram *p, AtriDiagnostic *d) 
     for (size_t i = 0; i < p->import_count; ++i) {
         const AtriImport *import = &p->imports[i];
         if (import->target == ATRI_NONE) {
-            *d = (AtriDiagnostic){import->path, "imports require the module loader"};
+            *d = (AtriDiagnostic){.span = import->path, .message = "imports require the module loader"};
             goto failure;
         }
         if (import->name.end) {
@@ -238,7 +300,10 @@ bool atri_prepare_symbols(AtriSource source, AtriProgram *p, AtriDiagnostic *d) 
     if (table.count) { qsort(table.items, table.count, sizeof(*table.items), symbol_order); }
     for (size_t i = 1; i < table.count; ++i) {
         if (!symbol_order(&table.items[i-1], &table.items[i])) {
-            *d = (AtriDiagnostic){table.items[i].span, "duplicate function, global or imported name"};
+            AtriSpan first = table.items[i-1].span, second = table.items[i].span;
+            if (first.start > second.start) { AtriSpan swap = first; first = second; second = swap; }
+            *d = (AtriDiagnostic){.span = second, .message = "duplicate function, global or imported name"};
+            atri_diagnostic_note(d, first, "previous declaration here");
             goto failure;
         }
     }
@@ -251,22 +316,39 @@ failure:
     return false;
 }
 
-void atri_program_diagnostic(FILE *stream, AtriSource source, const AtriProgram *program, AtriDiagnostic diagnostic) {
+static void program_label(FILE *stream, AtriSource source, const AtriProgram *program,
+                          AtriSpan span, const char *level, const char *message, const char *detail) {
+    const AtriSourceMap *map = NULL;
     if (program->module_count) {
-        AtriModule module = program->modules[atri_module_at(program, diagnostic.span.start)];
+        AtriModule module = program->modules[atri_module_at(program, span.start)];
+        map = module.origins;
         source = (AtriSource){module.path, source.text + module.span.start, module.span.end-module.span.start};
-        diagnostic.span.start -= module.span.start;
-        diagnostic.span.end = diagnostic.span.end > module.span.end ? source.length : diagnostic.span.end-module.span.start;
+        span.start -= module.span.start;
+        span.end = span.end > module.span.end ? source.length : span.end-module.span.start;
     }
-    atri_print_diagnostic(stream, source, diagnostic);
+    atri_source_label(stream, map, source, span, level, message, detail);
+}
+
+void atri_program_diagnostic(FILE *stream, AtriSource source, const AtriProgram *program, AtriDiagnostic d) {
+    program_label(stream, source, program, d.span, "error", d.message, d.detail);
+    for (size_t i = 0; i < d.note_count; ++i) {
+        program_label(stream, source, program, d.notes[i].span, "note", d.notes[i].message, "");
+    }
+    if (d.omitted) { fprintf(stream, "note: %zu further locations omitted\n", d.omitted); }
 }
 
 bool atri_load_program(AtriSource input, AtriSource *source, AtriProgram *program, AtriDiagnostic *diagnostic) {
-    Loader loader = {.diagnostic = diagnostic};
+    return atri_expand_program(input, NULL, 0, source, program, diagnostic);
+}
+
+bool atri_discover_sources(AtriSource input, const AtriSource *overlays, size_t overlay_count,
+                       AtriSource *source, AtriProgram *program, AtriDiagnostic *diagnostic) {
+    *diagnostic = (AtriDiagnostic){0};
+    Loader loader = {.diagnostic = diagnostic, .overlays = overlays, .overlay_count = overlay_count};
     char *text = malloc(input.length+1);
-    char *path = canonical(input.name);
+    char *path = atri_canonical_path(input.name);
     if (!path) { path = malloc(strlen(input.name)+1); if (path) { strcpy(path, input.name); } }
-    if (!text || !path) { free(text); free(path); *diagnostic = (AtriDiagnostic){{0}, "out of memory"}; return false; }
+    if (!text || !path) { free(text); free(path); *diagnostic = (AtriDiagnostic){.span = {0}, .message = "out of memory"}; return false; }
     memcpy(text, input.text, input.length); text[input.length] = 0;
     bool ok = load(&loader, path, text, input.length, 0);
     char *combined = calloc(loader.length+1, 1);
@@ -281,24 +363,37 @@ bool atri_load_program(AtriSource input, AtriSource *source, AtriProgram *progra
     free(loader.texts);
     if (!combined) {
         for (size_t i = 0; i < loader.count; ++i) { free(loader.modules[i].path); }
-        free(loader.modules); *diagnostic = (AtriDiagnostic){{0}, "out of memory"}; return false;
+        free(loader.modules); *diagnostic = (AtriDiagnostic){.span = {0}, .message = "out of memory"}; return false;
     }
     *source = (AtriSource){input.name, combined, loader.length};
     *program = (AtriProgram){0};
-    if (ok) { ok = atri_parse_sources(*source, loader.modules, loader.count, program, diagnostic); }
     program->modules = loader.modules; program->module_count = loader.count;
-    if (!ok) { if (!diagnostic->message) { *diagnostic = (AtriDiagnostic){{0}, "cannot load module"}; } return false; }
+    if (!ok) { if (!diagnostic->message) { *diagnostic = (AtriDiagnostic){.span = {0}, .message = "cannot load module"}; } return false; }
+    return true;
+}
+bool atri_bind_imports(AtriSource source, AtriProgram *program, AtriDiagnostic *diagnostic) {
     for (size_t i = 0; i < program->import_count; ++i) {
         AtriImport *item = &program->imports[i];
+        if (item->target != ATRI_NONE) { continue; }
         AtriId owner = atri_module_at(program, item->path.start);
-        char *candidate = import_path(program->modules[owner].path, combined, item->path);
-        char *resolved = candidate ? canonical(candidate) : NULL;
+        char *candidate = atri_import_path(program->modules[owner].path, source.text, item->path);
+        char *resolved = candidate ? atri_canonical_path(candidate) : NULL;
         free(candidate);
         for (size_t j = 0; resolved && j < program->module_count; ++j) {
             if (!strcmp(resolved, program->modules[j].path)) { item->target = j; break; }
         }
         free(resolved);
-        if (item->target == ATRI_NONE) { *diagnostic = (AtriDiagnostic){item->path, "cannot resolve module"}; return false; }
+        if (item->target == ATRI_NONE) { *diagnostic = (AtriDiagnostic){.span = item->path, .message = "cannot resolve module"}; return false; }
     }
-    return atri_prepare_symbols(*source, program, diagnostic);
+    return atri_prepare_symbols(source, program, diagnostic);
+}
+bool atri_load_sources(AtriSource input, const AtriSource *overlays, size_t overlay_count, bool index_declarations,
+                       AtriSource *source, AtriProgram *program, AtriDiagnostic *diagnostic) {
+    if (!atri_discover_sources(input, overlays, overlay_count, source, program, diagnostic)) { return false; }
+    AtriModule *modules = program->modules;
+    size_t count = program->module_count;
+    bool ok = atri_parse_sources(*source, modules, count, index_declarations, program, diagnostic);
+    program->modules = modules;
+    program->module_count = count;
+    return ok && atri_bind_imports(*source, program, diagnostic);
 }

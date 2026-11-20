@@ -12,7 +12,7 @@ typedef struct {
     bool *reachable;
 } Check;
 static bool bad(AtriDiagnostic *d, AtriSpan span, const char *message) {
-    *d = (AtriDiagnostic){span, message}; return false;
+    *d = (AtriDiagnostic){.span = span, .message = message}; return false;
 }
 static bool available(const Check *c, size_t use, AtriId id) {
     if (id >= use) return false;

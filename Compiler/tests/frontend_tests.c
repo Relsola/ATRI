@@ -89,22 +89,22 @@ static void pointer_ast(void) {
     CHECK(atri_lexer_next(&lexer, &d).kind == ATRI_TOKEN_NULL);
     CHECK(atri_lexer_next(&lexer, &d).kind == ATRI_TOKEN_IDENTIFIER);
     reject(source("fn f()->i32{p:*=null;return 0;}"), "type name");
-    reject(source("fn f()->i32{return &;}"), "integer expression");
+    reject(source("fn f()->i32{return &;}"), "expected an expression");
 }
 static void errors_and_growth(void) {
     struct { const char *input, *message; } cases[] = {
         {"fn i32 main(){}", "expected '('"}, {"fn f(i32 a)->i32{}", "expected ':'"},
         {"fn f(a:i32,)->i32{}", "parameter name"}, {"fn f()->i32{const a:i32=0;}", "expected ':'"},
-        {"fn f()->i32{let a:i32;}", "expected ':'"}, {"fn f()->i32{return +;}", "integer expression"},
-        {"fn f()->i32{a:i32 :=;return 0;}", "integer expression"},
+        {"fn f()->i32{let a:i32;}", "expected ':'"}, {"fn f()->i32{return +;}", "expected an expression"},
+        {"fn f()->i32{a:i32 :=;return 0;}", "expected an expression"},
         {"fn f()->i32{a::1;return 0;}", "module member"},
         {"fn f()->i32{a:i32:1;return 0;}", "expected ':='"},
         {"fn f()->i32{a:i32: =1;return 0;}", "expected ':='"},
-        {"fn f()->i32{return 1+;}", "integer expression"}, {"fn f()->i32{return g(1,);}", "integer expression"},
+        {"fn f()->i32{return 1+;}", "expected an expression"}, {"fn f()->i32{return g(1,);}", "expected an expression"},
         {"fn f()->i32{return (1+2;}", "expected ')'"}, {"fn f()->i32{return 0}", "expected ';'"},
         {"fn f()->i32{return 1__000;}", "separator"}, {"fn f()->i32{return 0x;}", "requires digits"},
         {"fn f()->i32{return 1.5;}", "floating-point"}, {"fn f()->i32{", "expected '}'"},
-        {"fn f()->i32{}@", "unexpected character"}, {"fnmain()->i32{}", "top level"}
+        {"fn f()->i32{}@", "annotation name"}, {"fnmain()->i32{}", "top level"}
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) reject(source(cases[i].input), cases[i].message);
     char large_literal[350] = "fn f()->i32{return ";
@@ -142,10 +142,9 @@ static void attributes_and_strings(void) {
     reject(source("[[extern(C)]] fn f()->i32;"), "top level");
     reject(source("##extern(C) fn f()->i32;"), "unknown compiler directive");
     reject(source("fn f()->i32{return run 1;}"), "expected ';'");
-    reject(source("#run {}"), "reserved but not implemented");
-    reject(source("fn f()->void{#run {}}"), "reserved but not implemented");
-    reject(source("#run -> i32 {return 2;}"), "reserved but not implemented");
-    reject(source("fn f()->i32{return #run -> i32 {return 2;};}"), "reserved but not implemented");
+    CHECK(atri_parse(source("#run {} fn f()->i32{return #run -> i32 {return 2;};}"), &p, &d));
+    CHECK(p.run_count == 1 && p.run_block_count == 2);
+    atri_program_destroy(&p);
     reject(source("#extern(C)#extern(C) fn f()->i32;"), "top level");
     reject(source("#extern(C) fn f()->i32{return 0;}"), "cannot have a body");
     reject(source("fn f()->i32;"), "require braces");
@@ -246,7 +245,7 @@ static void integer_operators_and_literals(void) {
     reject(source("fn f()->u8{return '\\x1'; }"), "exactly two hexadecimal digits");
     reject(source("fn f()->u8{return '\\01'; }"), "one decoded byte");
     reject(source("fn f()->*u8{return \"\\?\"; }"), "unsupported string escape");
-    reject(source("fn f()->i32{x:i32;return x++;}"), "integer expression");
+    reject(source("fn f()->i32{x:i32;return x++;}"), "expected an expression");
 }
 static void union_ast(void) {
     AtriSource input = source("export union Value{bits:u32;bytes:[4]u8;}union Handle;"

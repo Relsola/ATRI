@@ -1,0 +1,12 @@
+#extern(C) fn strcmp(a:*u8,b:*u8)->i32;
+#extern(C) fn strstr(s:*u8, part:*u8)->*u8;
+visits: i32;
+fn atri_on_decl_v1(id:u64,kind:u32,module:*u8,name:*u8,source:*u8,replacement:**u8,injection:**u8)->i32 {
+    if (strcmp(name, "invalid_edit") == 0) {
+        visits += 1;
+        if (visits != 1 || strstr(#keyword(id), "return true") == null) { return 1; }
+        *replacement = "fn invalid_edit()->i32{return late();}";
+        *injection = "fn late()->i32{return 23;}";
+    }
+    return 0;
+}

@@ -36,6 +36,9 @@ typedef struct {
     AtriSpan span;
     AtriId expression, result;
     size_t first_instruction;
+    AtriSpan nonnull_use;
+    bool discard, lexical;
+    size_t capture_owner; /* 捕获来源函数的下标加一；普通表达式为零。 */
     uint64_t bits;
     unsigned char state;
 } AtriIRConstant;
@@ -81,6 +84,8 @@ typedef struct {
     bool flags;
 } AtriIREnum;
 typedef struct {
+    AtriSource source;
+    const AtriProgram *lowering_ast;
     AtriIREnum *enums;
     size_t enum_count;
     AtriIREnumVariant *variants;
@@ -108,8 +113,12 @@ bool atri_ir_append(AtriIRFunction *f, AtriIRInst instruction, AtriId *result);
 bool atri_resolve_constants(AtriIRProgram *program, AtriDiagnostic *diagnostic);
 void atri_ir_destroy(AtriIRProgram *program);
 void atri_dump_ir(FILE *stream, AtriSource source, const AtriIRProgram *program);
+typedef struct { bool *functions, *globals, *strings; } AtriLiveSymbols;
+bool atri_runtime_symbols(AtriSource source, const AtriIRProgram *p, AtriLiveSymbols *live, AtriDiagnostic *d);
+void atri_live_symbols_destroy(AtriLiveSymbols *live);
 bool atri_emit_x64(FILE *stream, AtriSource source, const AtriIRProgram *program,
                    AtriDiagnostic *diagnostic);
+bool atri_emit_llvm(FILE *stream, AtriSource source, const AtriIRProgram *program, AtriDiagnostic *diagnostic);
 int64_t atri_i32_signed(uint32_t bits);
 int64_t atri_i64_signed(uint64_t bits);
 bool atri_ir_is_struct(AtriIRType type); /* 名义聚合 ID 区间，包含 struct/union；具体布局由 is_union 区分。 */

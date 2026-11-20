@@ -20,7 +20,19 @@ typedef struct {
 typedef struct {
     AtriSpan span;
     const char *message;
+} AtriDiagnosticLabel;
+
+typedef struct {
+    AtriSpan span;
+    const char *message;
+    char detail[192];
+    AtriDiagnosticLabel notes[12];
+    size_t note_count, omitted;
 } AtriDiagnostic;
+
+void atri_diagnostic_note(AtriDiagnostic *diagnostic, AtriSpan span, const char *message);
+void atri_print_label(FILE *stream, AtriSource source, AtriSpan span, const char *level,
+                      const char *message, const char *detail);
 
 typedef struct {
     size_t line;
@@ -48,7 +60,7 @@ typedef struct {
     AtriId left, right, alternative;
     size_t first_argument, argument_count;
     size_t tree_depth;
-    bool boolean;
+    bool boolean, custom, run_block, keyword;
 } AtriExpr;
 typedef enum {
     ATRI_STMT_CONSTANT, ATRI_STMT_VARIABLE, ATRI_STMT_ASSIGN, ATRI_STMT_RETURN,
@@ -95,7 +107,12 @@ typedef struct { AtriSpan name; AtriId expression; } AtriEnumVariant;
 typedef struct { AtriSpan span; AtriId expression, body; bool through; } AtriCase;
 typedef struct { AtriSpan name, path; AtriId target; } AtriImport;
 typedef struct { AtriStatement declaration; bool exported; } AtriGlobal;
-typedef struct { char *path; AtriSpan span; } AtriModule;
+typedef struct { char *path; AtriSpan span; struct AtriSourceMap *origins; } AtriModule;
+typedef struct {
+    AtriSpan span, name;
+    unsigned kind;
+    size_t first_annotation, annotation_count;
+} AtriDeclaration;
 typedef enum {
     ATRI_SYMBOL_FUNCTION, ATRI_SYMBOL_GLOBAL, ATRI_SYMBOL_MODULE, ATRI_SYMBOL_STRUCT, ATRI_SYMBOL_ENUM
 } AtriSymbolKind;
@@ -110,6 +127,14 @@ typedef struct {
 
 /* 节点以稳定 ID 互相引用，扩容不使引用失效；块的语句范围指向 block_statements 边数组。 */
 typedef struct {
+    struct AtriRunCache *run_cache;
+    bool owns_run_cache, generator_scope;
+    AtriId keyword_function; /* 插件宿主函数下标加一，普通程序为零。 */
+    AtriDeclaration *declarations; /* 仅在监听声明时按源码顺序记录，含 export 和可选分号。 */
+    size_t declaration_count;
+    AtriSpan *annotations;
+    size_t annotation_count;
+    AtriSpan unresolved_operator;
     AtriEnum *enums;
     size_t enum_count;
     AtriEnumVariant *variants;
@@ -117,7 +142,7 @@ typedef struct {
     AtriCase *cases;
     size_t case_count;
     AtriId *runs;
-    size_t run_count;
+    size_t run_count, run_block_count;
     AtriArrayType *array_types;
     size_t array_type_count;
     AtriStruct *structs;
@@ -158,8 +183,17 @@ typedef struct {
  */
 bool atri_parse(AtriSource source, AtriProgram *output,
                 AtriDiagnostic *diagnostic);
-bool atri_parse_sources(AtriSource source, const AtriModule *modules, size_t count, AtriProgram *program, AtriDiagnostic *diagnostic);
+bool atri_parse_sources(AtriSource source, const AtriModule *modules, size_t count, bool index_declarations,
+                        AtriProgram *program, AtriDiagnostic *diagnostic);
+bool atri_parse_fragment(AtriSource source, AtriSpan span, AtriProgram *output, AtriDiagnostic *diagnostic);
+bool atri_parse_next(AtriSource source, AtriSpan span, size_t *next, AtriProgram *output, AtriDiagnostic *diagnostic);
+bool atri_discover_sources(AtriSource input, const AtriSource *overlays, size_t overlay_count,
+                           AtriSource *source, AtriProgram *program, AtriDiagnostic *diagnostic);
+bool atri_bind_imports(AtriSource source, AtriProgram *program, AtriDiagnostic *diagnostic);
 bool atri_load_program(AtriSource input, AtriSource *source, AtriProgram *program, AtriDiagnostic *diagnostic);
+char *atri_read_stream(FILE *stream, size_t *length);
+bool atri_load_sources(AtriSource input, const AtriSource *overlays, size_t overlay_count,
+                       bool index_declarations, AtriSource *source, AtriProgram *program, AtriDiagnostic *diagnostic);
 /* 成功后 AST 持有有序名称表，表项借用同一份 source 的字节；失败可重试。 */
 bool atri_prepare_symbols(AtriSource source, AtriProgram *program, AtriDiagnostic *diagnostic);
 AtriId atri_module_at(const AtriProgram *program, size_t offset);
@@ -168,7 +202,9 @@ AtriId atri_find_declaration(AtriSource source, const AtriProgram *program, size
                              AtriSpan name, AtriSpan qualifier, bool *global);
 AtriId atri_find_struct(AtriSource source, const AtriProgram *program, size_t offset, AtriSpan name, AtriSpan qualifier);
 AtriId atri_find_enum(AtriSource source, const AtriProgram *program, size_t offset, AtriSpan name, AtriSpan qualifier);
+AtriSpan atri_declaration_name(AtriSource source, const AtriProgram *program, AtriSpan name, AtriSpan qualifier);
 void atri_program_diagnostic(FILE *stream, AtriSource source, const AtriProgram *program, AtriDiagnostic diagnostic);
+void atri_run_cache_destroy(struct AtriRunCache *cache);
 void atri_program_destroy(AtriProgram *program);
 void atri_dump_ast(FILE *stream, AtriSource source,
                    const AtriProgram *program);

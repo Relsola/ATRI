@@ -8,6 +8,11 @@ set(CMAKE_C_EXTENSIONS OFF)
 add_library(atri_frontend STATIC
     src/types.c
     src/modules.c
+    src/meta.c
+    src/source_map.c
+    src/meta_syntax.c
+    src/meta_ast.c
+    src/meta_check.c
     src/lexer.c
     src/ir_verify.c
     src/parser.c
@@ -15,17 +20,21 @@ add_library(atri_frontend STATIC
     src/ir.c
     src/lower.c
     src/consteval.c
+    src/vm_memory.c
+    src/vm_bytecode.c
     src/optimize.c
     src/backend_x64.c
+    src/backend_llvm.c
 )
 target_include_directories(atri_frontend PUBLIC src)
 
-add_executable(atri-parse src/main.c)
-target_link_libraries(atri-parse PRIVATE atri_frontend)
-add_executable(atri-cc src/main.c)
-target_link_libraries(atri-cc PRIVATE atri_frontend)
+add_executable(atri-parse src/main.c src/meta_host.c src/clang_driver.c src/llvm_pass.c)
+target_link_libraries(atri-parse PRIVATE atri_frontend ${CMAKE_DL_LIBS})
+add_executable(atri-cc src/main.c src/meta_host.c src/clang_driver.c src/llvm_pass.c)
+target_link_libraries(atri-cc PRIVATE atri_frontend ${CMAKE_DL_LIBS})
 target_compile_definitions(atri-cc PRIVATE ATRI_COMPILER_DRIVER)
 if(WIN32)
+    set_target_properties(atri-parse atri-cc PROPERTIES ENABLE_EXPORTS ON)
     target_compile_definitions(atri-parse PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_definitions(atri-cc PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
@@ -61,6 +70,12 @@ if(BUILD_TESTING)
         if(ATRI_TEST_CLANG)
             add_executable(test-bindings tests/generate_bindings.c)
             target_link_libraries(test-bindings PRIVATE atri_test_support)
+            add_test(NAME compiler-pipeline COMMAND "${CMAKE_COMMAND}"
+                "-DCOMPILER=$<TARGET_FILE:atri-cc>"
+                "-DCLANG=${ATRI_TEST_CLANG}"
+                "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+                "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/pipeline-tests"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/pipeline_tests.cmake")
             add_test(NAME native-execution COMMAND "${CMAKE_COMMAND}"
                 "-DCOMPILER=$<TARGET_FILE:atri-cc>"
                 "-DCLANG=${ATRI_TEST_CLANG}"

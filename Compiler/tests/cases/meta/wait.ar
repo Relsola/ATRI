@@ -1,0 +1,4 @@
+import "library";
+fn waiting() -> i32 { return #run supplied(); }
+fn generate() -> void {}
+fn start() -> i32 { return waiting() + library_value(); }

@@ -261,3 +261,55 @@ void atri_dump_ir(FILE *s, AtriSource source, const AtriIRProgram *p) {
         fputs("}\n", s);
     }
 }
+
+void atri_live_symbols_destroy(AtriLiveSymbols *live) {
+    free(live->functions);
+    free(live->strings);
+    free(live->globals);
+    *live = (AtriLiveSymbols){0};
+}
+
+bool atri_runtime_symbols(AtriSource source, const AtriIRProgram *p, AtriLiveSymbols *live, AtriDiagnostic *d) {
+    AtriId entry = SIZE_MAX;
+    for (size_t n = 0; n < p->function_count; ++n) {
+        if (!p->functions[n].external_c && !p->functions[n].module && p->functions[n].name.end - p->functions[n].name.start == 4 &&
+            !memcmp(source.text + p->functions[n].name.start, "main", 4)) {
+            entry = n;
+            break;
+        }
+    }
+    if (entry == SIZE_MAX) {
+        return true;
+    }
+    bool *reachable = calloc(p->function_count, sizeof(*reachable));
+    AtriId *pending = malloc(p->function_count * sizeof(*pending));
+    live->globals = calloc(p->global_count + 1, sizeof(bool));
+    live->strings = calloc(p->string_count + 1, sizeof(bool));
+    if (!reachable || !pending || !live->globals || !live->strings) {
+        free(reachable);
+        atri_live_symbols_destroy(live);
+        free(pending);
+        *d = (AtriDiagnostic){.span = p->functions[entry].name, .message = "out of memory during function reachability analysis"};
+        return false;
+    }
+    /* 按优化后剩余的调用边遍历；入队即标记，每个函数只扫描一次，递归环不会反复入队。
+     * 只筛选输出，不压紧函数数组，以保持 call.callee 及临时符号编号稳定。 */
+    size_t pending_count = 1;
+    pending[0] = entry;
+    reachable[entry] = true;
+    for (size_t next = 0; next < pending_count; ++next) {
+        const AtriIRFunction *f = &p->functions[pending[next]];
+        for (size_t i = 0; i < f->instruction_count; ++i) {
+            const AtriIRInst *inst = &f->instructions[i];
+            if (inst->kind == ATRI_IR_STRING) { live->strings[inst->immediate] = true; }
+            if (inst->kind == ATRI_IR_LOCAL && inst->immediate) { live->globals[inst->immediate - 1] = true; }
+            if (inst->kind == ATRI_IR_CALL && !reachable[inst->callee]) {
+                reachable[inst->callee] = true;
+                pending[pending_count++] = inst->callee;
+            }
+        }
+    }
+    free(pending);
+    live->functions = reachable;
+    return true;
+}

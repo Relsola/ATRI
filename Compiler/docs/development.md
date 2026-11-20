@@ -58,7 +58,7 @@
 
 ## 验证与调试
 
-先构建当前配置，再运行对应测试；CTest 本身不会重新编译。宿主 Debug/Release 与 ATRI 的 -O0/-O1 是两种不同设置，不能互相替代。
+先构建当前配置，再运行对应的 CTest 分组。CMake 的 Debug/Release 控制宿主编译器的构建，ATRI 的 `-O0`、`-O1` 和 `-O2` 控制输入程序使用的后端。
 
 | 改动 | 优先验证 |
 | --- | --- |
@@ -66,7 +66,7 @@
 | 仅注释 | 核对有效代码未变；注释边界/编码或构建输入变化时补构建 |
 | 词法/解析/诊断 | frontend、compiler、control-flow 中相关用例 |
 | 类型/常量求值 | compiler、control-flow；涉及生成行为时补原生执行 |
-| IR/优化 | optimization、ir-verifier，加相关结果测试，分别覆盖 -O0/-O1 |
+| IR/优化 | `optimization` 检查独立的字节码优化，`ir-verifier` 检查 IR 约束，`compiler-pipeline` 检查 O1 的 LLVM IR 变换及 O0/O1/O2 产物 |
 | x64/调用约定/访存 | Windows 原生执行，核对参数、返回、别名及必要汇编预期 |
 | CMake/测试驱动/共享测试辅助 | 构建并运行受影响测试；共享路径改动检查全部分组 |
 

@@ -1,0 +1,46 @@
+// @math enables %% in this declaration. The listener rewrites it to addition.
+#extern(C) fn atri_register_annotation(name: *u8) -> i32;
+#extern(C) fn atri_register_infix(name: *u8, symbol: *u8, precedence: u32, right: u32) -> i32;
+#extern(C) fn atri_ast_has_annotation(decl: u64, name: *u8) -> i32;
+#extern(C) fn atri_ast_expression_count(decl: u64) -> u64;
+#extern(C) fn atri_ast_expression(decl: u64, index: u64) -> u64;
+#extern(C) fn atri_ast_operator(node: u64) -> *u8;
+#extern(C) fn atri_ast_operand(node: u64, side: u32) -> u64;
+#extern(C) fn atri_ast_replace(node: u64, source: *u8) -> i32;
+#extern(C) fn strcmp(a: *u8, b: *u8) -> i32;
+#extern(C) fn strlen(s: *u8) -> u64;
+#extern(C) fn malloc(size: u64) -> *void;
+#extern(C) fn free(p: *void) -> void;
+#extern(C) fn strcpy(out: *u8, s: *u8) -> *u8;
+#extern(C) fn strcat(out: *u8, s: *u8) -> *u8;
+
+fn atri_register_v1() -> i32 {
+    if (atri_register_annotation("math") == 0) { return 1; }
+    if (atri_register_infix("math", "%%", 19, 0) == 0) { return 1; }
+    return 0;
+}
+
+fn atri_on_decl_v1(decl: u64, kind: u32, module: *u8, name: *u8, source: *u8,
+                   replacement: **u8, injection: **u8) -> i32 {
+    if (atri_ast_has_annotation(decl, "math") == 0) { return 0; }
+    i: u64 = 0;
+    while (i < atri_ast_expression_count(decl)) {
+        node: u64 = atri_ast_expression(decl, i);
+        if (strcmp(atri_ast_operator(node), "%%") == 0) {
+            left: *u8 = #keyword(atri_ast_operand(node, 0));
+            right: *u8 = #keyword(atri_ast_operand(node, 1));
+            code: *u8 = cast(*u8, malloc(strlen(left) + strlen(right) + 8));
+            if (code == null) { return 1; }
+            strcpy(code, "(");
+            strcat(code, left);
+            strcat(code, ") + (");
+            strcat(code, right);
+            strcat(code, ")");
+            changed: i32 = atri_ast_replace(node, code);
+            free(cast(*void, code));
+            if (changed == 0) { return 1; }
+            i = 0;
+        } else { i += 1; }
+    }
+    return 0;
+}

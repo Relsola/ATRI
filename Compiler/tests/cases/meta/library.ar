@@ -1,0 +1,1 @@
+export fn library_value() -> i32 { return 2; }
