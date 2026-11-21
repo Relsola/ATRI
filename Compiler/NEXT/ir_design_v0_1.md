@@ -12,19 +12,21 @@ AtriIRProgram → AtriIRFunction → AtriIRInst[]，函数另有调用实参索�
 
 `external_c` 函数记录签名与 `variadic` 标志。`parameter_count` 只计固定前缀，`instruction_count`、`argument_count` 和 `block_count` 均为 0。可变参数仅用于外部声明。`call` 通过函数索引引用普通定义或外部声明，检查固定前缀的精确类型和尾参的 C 默认提升。运行期外部调用交给目标链接器，编译期外部调用按名称与签名分派给 VM 的宿主绑定。[宿主绑定表](../src/vm_memory.c)
 
-param、const、unary、binary、cast、compare、call、load、address、ptr_offset、ptr_diff、string、zero 产生值，void call 例外。string.type 必须为 *u8，immediate 是 Program.strings 的稳定索引，不是宿主或目标地址，优化/内联复制指令时保留此索引。local 是内部存储对象，field/index 是内部位置，均不能作为普通值；store/控制指令不产生值；NOP 标记删除的指令。值必须先定义再使用，在可达 CFG 上定义块必须支配使用块。本轮不引入 phi；跨分支/回边的可变状态由显式局部存储表达。
+param、context、function、const、unary、binary、cast、compare、call、load、address、ptr_offset、ptr_diff、string、zero 产生值，void call 例外。STRING.immediate 索引 Program.strings。view 标识原生 string，后端为其生成 data/len 描述符并输出准确长度的静态正文。*u8 形式额外输出 C 终止零。local 是内部存储对象，field/index 是内部位置，均不能作为普通值；store/控制指令不产生值；NOP 标记删除的指令。值必须先定义再使用，在可达 CFG 上定义块必须支配使用块。本轮不引入 phi；跨分支/回边的可变状态由显式局部存储表达。
 
 整数常量用 uint64_t 保存类型位宽内的位模式，位宽之外必须为 0；有符号解释不依赖宿主 C 溢出。bool 常量仅允许 0/1。指针 const 只表示 null，不能借常量字段伪造非空宿主地址。
 
+普通函数的 `has_context` 标记末尾的隐式指针参数。`CONTEXT` 引用传入指针，C 入口和独立 VM 求值入口按需建立根 Context。`FUNCTION` 取得经签名检查的分配器回调地址；间接 `CALL` 的 `procedure` 记录该操作数 ID 加一，零表示直接调用。原生后端传递代码地址，VM 使用受检的函数索引。`list(T)` 复用标准库 Storage 的布局，按元素类型分别登记结构体，追加前在调用处取得元素快照。
+
 ## 模块与全局存储
 
-AST 保留 import、export、全局声明与模块文件区间。模块加载器在确定导入目标后准备名称表，单文件语法入口在首次 lowering 时准备同一张表。表按模块与名称排序，名称借用源码字节，目标保留原声明 ID。只有建表与重名检查全部成功才将表交给 AST；后续 lowering 复用，随 AST 销毁。IR 函数保存 module ID，仅根模块的 main 使用入口符号。Program.globals 保存全局类型及编译期常量标记。标量初值使用 bits，数组和 struct/union 初值使用 Global 自有的 data/data_size，长度精确等于目标布局大小，destroy 逐项释放。两种表示互斥，聚合不能标记为编译期常量。共享全局不按导入次数复制，编译期常量引用折叠后不输出独立数据对象。
+AST 保留 import、export、全局声明与模块文件区间。模块加载器在确定导入目标后准备名称表，单文件语法入口在首次 lowering 时准备同一张表。表按模块与名称排序，名称借用源码字节，目标保留原声明 ID。只有建表与重名检查全部成功才将表交给 AST；后续 lowering 复用，随 AST 销毁。IR 函数保存 module ID，仅根模块的 main 使用入口符号。Program.globals 保存全局类型及编译期常量标记。标量初值使用 bits，数组和 struct/union 初值使用 Global 自有的 data/data_size，长度精确等于目标布局大小，destroy 逐项释放。原生 string 的编译期结果物化为静态字节或空视图，其余聚合沿用普通全局存储。共享全局不按导入次数复制，编译期常量引用折叠后不输出独立数据对象。
 
 LOCAL.immediate 为 0 时表示原栈对象，非零时表示 globals 索引 + 1 的全局存储位置。LOAD/STORE/ADDRESS 继续引用该稳定位置；Verifier 检查索引、类型及不写编译期常量。后端对全局位置使用 RIP 相对寻址，不分配栈对象，不插入锁或原子操作。优化器保留 STORE 和相关存储位置，含访存函数不作为叶函数内联目标。常量解释器拒绝读取/写入运行期全局，不执行宿主全局访问。
 
 全局初始化暂以临时函数及常量义务使用现有解释器求值；求值后提取初始位模式、替换全局编译期常量引用并删除临时函数。结构体全局的花括号初始化递归展开为标量叶子义务，字段默认值借用既有临时函数；先分配全零目标字节，再将求值结果按字段偏移和 Windows x64 小端位模式写入，不 memcpy 宿主整数。嵌套结构体和字段数组采用同一遍历，不让解释器执行聚合内存操作。物化全次编译限 100000 节点/256 深度；无显式子项的零大小子树直接跳过，重复/未知字段和数组越界项仍诊断。
 
-Verifier 检查静态缓冲区长度及非 union 路径上的嵌套 bool 的 0/1 表示、指针的全零表示，忽略填充字节；union 表示边界见下节。布局和缓冲区检查先于内容遍历，内容检查每对象限 100000 节点/256 深度。Dump 输出聚合初始字节，后端按自然对齐发出完整 .byte 数据（包含填充）；零大小全局使用一字节地址锚点，IR data_size 和语言 sizeof 仍为 0。每个聚合全局增加布局大小的编译器缓冲区及对应静态存储，叶子义务另占临时编译内存；默认零化和填充有数据体积成本，不产生用户程序的初始化调用或隐式堆分配。临时函数不进入最终调用图；指针静态初始值当前仅为 null，聚合调用/复制初值、聚合常量及静态重定位初始化尚未实现。
+Verifier 检查静态缓冲区长度及非 union 路径上的嵌套 bool 的 0/1 表示、指针的全零表示，忽略填充字节；union 表示边界见下节。布局和缓冲区检查先于内容遍历，内容检查每对象限 100000 节点/256 深度。Dump 输出聚合初始字节，后端按自然对齐发出完整 .byte 数据（包含填充）；零大小全局使用一字节地址锚点，IR data_size 和语言 sizeof 仍为 0。每个聚合全局增加布局大小的编译器缓冲区及对应静态存储，叶子义务另占临时编译内存；默认零化和填充有数据体积成本，不产生用户程序的初始化调用或隐式堆分配。对于全局对象内的 string 字面量，每个引用记录描述符偏移与正文的稳定索引。后端在指针槽生成目标重定位，长度仍是静态整数。其余数据指针初值仅限 null。临时函数不进入最终调用图。
 
 ## 结构体布局、值与调用
 

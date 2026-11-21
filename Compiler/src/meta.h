@@ -9,6 +9,7 @@ void atri_meta_close(AtriMetaPlugin *plugin);
 AtriMetaCallback *atri_meta_callback(AtriMetaPlugin *plugin);
 char *atri_canonical_path(const char *path);
 char *atri_import_path(const char *parent, const char *text, AtriSpan span);
+bool atri_standard_import(const char *text, AtriSpan span);
 bool atri_lower_generator(AtriSource source, const AtriProgram *ast, size_t declaration, AtriIRProgram *ir, AtriDiagnostic *d);
 typedef struct { const char *name; AtriMetaCallback *callback; } AtriListener;
 bool atri_expand_program(AtriSource input, const AtriListener *listeners, size_t count,

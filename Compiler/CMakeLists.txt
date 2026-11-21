@@ -27,10 +27,15 @@ add_library(atri_frontend STATIC
     src/backend_llvm.c
 )
 target_include_directories(atri_frontend PUBLIC src)
+target_compile_definitions(atri_frontend PRIVATE ATRI_STDLIB_DIR="$<TARGET_FILE_DIR:atri-cc>/stdlib")
 
 add_executable(atri-parse src/main.c src/meta_host.c src/clang_driver.c src/llvm_pass.c)
 target_link_libraries(atri-parse PRIVATE atri_frontend ${CMAKE_DL_LIBS})
 add_executable(atri-cc src/main.c src/meta_host.c src/clang_driver.c src/llvm_pass.c)
+foreach(module compiler mem list string)
+    file(GENERATE OUTPUT "$<TARGET_FILE_DIR:atri-cc>/stdlib/${module}.ar"
+        INPUT "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/${module}.ar")
+endforeach()
 target_link_libraries(atri-cc PRIVATE atri_frontend ${CMAKE_DL_LIBS})
 target_compile_definitions(atri-cc PRIVATE ATRI_COMPILER_DRIVER)
 if(WIN32)

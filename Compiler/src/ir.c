@@ -2,6 +2,12 @@
 #include "array.h"
 #include <inttypes.h>
 
+bool atri_ir_allocator_callback(const AtriIRFunction *f) {
+    return f->has_context && f->return_type == ATRI_IR_PTR_VOID && f->parameter_count == 5 && f->parameter_types &&
+        f->parameter_types[0] == ATRI_IR_PTR_VOID && f->parameter_types[1] == ATRI_IR_PTR_VOID &&
+        f->parameter_types[2] == ATRI_IR_U64 && f->parameter_types[3] == ATRI_IR_U64 && f->parameter_types[4] == ATRI_IR_PTR_VOID;
+}
+
 int64_t atri_i32_signed(uint32_t bits) {
     return bits <= INT32_MAX ? (int64_t)bits : (int64_t)bits - INT64_C(4294967296);
 }
@@ -53,7 +59,7 @@ bool atri_integer_literal(AtriSource source, AtriSpan text, uint64_t limit, uint
     *out = value; return true;
 }
 bool atri_ir_has_value(AtriIRKind kind) {
-    return kind == ATRI_IR_PARAM || kind == ATRI_IR_CONST || kind == ATRI_IR_UNARY ||
+    return kind == ATRI_IR_PARAM || kind == ATRI_IR_CONTEXT || kind == ATRI_IR_FUNCTION || kind == ATRI_IR_CONST || kind == ATRI_IR_UNARY ||
         kind == ATRI_IR_BINARY || kind == ATRI_IR_CAST || kind == ATRI_IR_C_PROMOTE || kind == ATRI_IR_CALL || kind == ATRI_IR_LOAD ||
         kind == ATRI_IR_PTR_OFFSET || kind == ATRI_IR_PTR_DIFF || kind == ATRI_IR_ADDRESS || kind == ATRI_IR_COMPARE || kind == ATRI_IR_STRING || kind == ATRI_IR_ZERO;
 }
@@ -76,10 +82,14 @@ static const char *base_type_name(AtriIRType type) {
     return type == ATRI_IR_VOID ? "void" : type == ATRI_IR_U64 ? "u64" : type == ATRI_IR_U8 ? "u8" : atri_ir_is_array(type) ? "array" : type == ATRI_IR_I64 ? "i64" :
         type == ATRI_IR_I32 ? "i32" : type == ATRI_IR_BOOL ? "bool" : atri_ir_is_struct(type) ? "struct" : "<invalid>";
 }
-const char *atri_ir_type_name(AtriIRType type, char name[ATRI_IR_TYPE_NAME_SIZE]) {
+const char *atri_ir_type_name(const AtriIRProgram *p, AtriIRType type, char name[ATRI_IR_TYPE_NAME_SIZE]) {
     size_t depth = 0;
     while (atri_ir_is_pointer(type)) { name[depth++] = '*'; type = atri_ir_pointee(type); }
     const char *base = base_type_name(type);
+    if (atri_ir_is_struct(type) && (size_t)(type-ATRI_IR_STRUCT) < p->struct_count) {
+        if (type == p->string_type) { base = "string"; }
+        else if (p->structs[type-ATRI_IR_STRUCT].list) { base = "list"; }
+    }
     if (!depth) { return base; }
     memcpy(name+depth, base, strlen(base)+1);
     return name;
@@ -146,7 +156,7 @@ void atri_ir_destroy(AtriIRProgram *p) {
         free(p->strings[i].bytes);
     }
     if (p->globals) {
-        for (size_t i = 0; i < p->global_count; ++i) { free(p->globals[i].data); }
+        for (size_t i = 0; i < p->global_count; ++i) { free(p->globals[i].data); free(p->globals[i].strings); }
     }
     free(p->enums); free(p->variants); free(p->arrays); free(p->structs); free(p->fields);
     free(p->globals); free(p->strings); free(p->functions); *p = (AtriIRProgram){0};
@@ -156,7 +166,7 @@ void atri_dump_ir(FILE *s, AtriSource source, const AtriIRProgram *p) {
     for (size_t i = 0; i < p->enum_count; ++i) {
         const AtriIREnum *item = &p->enums[i];
         fprintf(s, "enum @enum.%zu %.*s storage %s%s\n", i, (int)(item->name.end-item->name.start),
-            source.text+item->name.start, atri_ir_type_name(item->underlying, type_name), item->flags ? " flags" : "");
+            source.text+item->name.start, atri_ir_type_name(p, item->underlying, type_name), item->flags ? " flags" : "");
         for (size_t j = 0; j < item->variant_count; ++j) {
             const AtriIREnumVariant *variant = &p->variants[item->first_variant+j];
             fprintf(s, "    %.*s = 0x%" PRIx64 "\n", (int)(variant->name.end-variant->name.start), source.text+variant->name.start, variant->bits);
@@ -164,7 +174,7 @@ void atri_dump_ir(FILE *s, AtriSource source, const AtriIRProgram *p) {
     }
     for (size_t i = 0; i < p->array_count; ++i) {
         fprintf(s, "type @array.%zu [%zu]%s size %zu align %zu\n", i, p->arrays[i].length,
-            atri_ir_type_name(p->arrays[i].element, type_name), atri_ir_type_size(p, (AtriIRType)(ATRI_IR_ARRAY+i)),
+            atri_ir_type_name(p, p->arrays[i].element, type_name), atri_ir_type_size(p, (AtriIRType)(ATRI_IR_ARRAY+i)),
             atri_ir_type_align(p, (AtriIRType)(ATRI_IR_ARRAY+i)));
     }
     for (size_t i = 0; i < p->struct_count; ++i) {
@@ -173,25 +183,37 @@ void atri_dump_ir(FILE *s, AtriSource source, const AtriIRProgram *p) {
         fprintf(s, "type @struct.%zu %s%.*s size %zu align %zu\n", i, t->is_union ? "union " : "", (int)(t->name.end-t->name.start), source.text+t->name.start, t->size, t->alignment);
         for (size_t j = 0; j < t->field_count; ++j) {
             const AtriIRField *field = &p->fields[t->first_field+j];
-            fprintf(s, "    %.*s: %s offset %zu\n", (int)(field->name.end-field->name.start), source.text+field->name.start, atri_ir_type_name(field->type, type_name), field->offset);
+            if (field->builtin_name) { fprintf(s, "    %s", field->builtin_name); }
+            else { fprintf(s, "    %.*s", (int)(field->name.end-field->name.start), source.text+field->name.start); }
+            fprintf(s, ": %s offset %zu\n", atri_ir_type_name(p, field->type, type_name), field->offset);
         }
     }
     for (size_t i = 0; i < p->global_count; ++i) {
         const AtriIRGlobal *g = &p->globals[i];
+        if (g->constant && g->type == p->string_type && atri_ir_is_struct(g->type)) {
+            fprintf(s, "constant @global.%zu %.*s: string = ", i, (int)(g->name.end-g->name.start), source.text+g->name.start);
+            if (g->bits) { fprintf(s, "@str.%" PRIu64 "\n", g->bits-1); }
+            else { fputs("{null, 0}\n", s); }
+            continue;
+        }
         if (atri_ir_is_aggregate(g->type)) {
             fprintf(s, "global @global.%zu %.*s: %s size %zu align %zu = bytes [", i,
-                (int)(g->name.end-g->name.start), source.text+g->name.start, atri_ir_type_name(g->type, type_name),
+                (int)(g->name.end-g->name.start), source.text+g->name.start, atri_ir_type_name(p, g->type, type_name),
                 g->data_size, atri_ir_type_align(p, g->type));
             for (size_t b = 0; b < g->data_size; ++b) { fprintf(s, "%s%02x", b ? " " : "", (unsigned)g->data[b]); }
-            fputs("]\n", s); continue;
+            fputc(']', s);
+            for (size_t j = 0; j < g->string_count; ++j) {
+                fprintf(s, " + ptr @str.%zu at %zu", g->strings[j].literal, g->strings[j].offset);
+            }
+            fputc('\n', s); continue;
         }
         fprintf(s, "%s @global.%zu %.*s: %s = %" PRIu64 "\n", g->constant ? "constant" : "global", i,
-            (int)(g->name.end-g->name.start), source.text+g->name.start, atri_ir_type_name(g->type, type_name), g->bits);
+            (int)(g->name.end-g->name.start), source.text+g->name.start, atri_ir_type_name(p, g->type, type_name), g->bits);
     }
     const char *ops[] = {"add", "sub", "mul", "sdiv", "srem", "neg", "eq", "ne", "lt", "le", "gt", "ge", "and", "or", "not", "bit_and", "bit_or", "bit_xor", "bit_not", "shl", "shr"};
     for (size_t i = 0; i < p->string_count; ++i) {
         fprintf(s, "data @str.%zu = \"", i);
-        for (size_t b = 0; b <= p->strings[i].length; ++b) {
+        for (size_t b = 0; b < p->strings[i].length + !p->strings[i].view; ++b) {
             fprintf(s, "\\x%02x", (unsigned)p->strings[i].bytes[b]);
         }
         fputs("\"\n", s);
@@ -199,9 +221,13 @@ void atri_dump_ir(FILE *s, AtriSource source, const AtriIRProgram *p) {
     for (size_t n = 0; n < p->function_count; ++n) {
         const AtriIRFunction *f = &p->functions[n];
         fprintf(s, "%sfunc @%.*s(", f->external_c ? "extern(C) " : "", (int)(f->name.end - f->name.start), source.text + f->name.start);
-        for (size_t a = 0; a < f->parameter_count; ++a) fprintf(s, "%s%s", a == 0 ? "" : ", ", atri_ir_type_name(f->parameter_types[a], type_name));
+        for (size_t a = 0; a < f->parameter_count; ++a) {
+            const char *type = f->has_context && a == atri_explicit_parameters(f) ? "implicit *Context" :
+                atri_ir_type_name(p, f->parameter_types[a], type_name);
+            fprintf(s, "%s%s", a ? ", " : "", type);
+        }
         if (f->variadic) { fputs(f->parameter_count ? ", ..." : "...", s); }
-        fprintf(s, ") -> %s", atri_ir_type_name(f->return_type, type_name));
+        fprintf(s, ") -> %s", atri_ir_type_name(p, f->return_type, type_name));
         if (f->external_c) {
             fputs(";\n", s); continue;
         }
@@ -210,8 +236,8 @@ void atri_dump_ir(FILE *s, AtriSource source, const AtriIRProgram *p) {
             const AtriIRInst *v = &f->instructions[i];
             if (v->kind == ATRI_IR_NOP) continue;
             if (v->kind == ATRI_IR_RETURN && v->type == ATRI_IR_VOID) { fputs("    ret void\n", s); continue; }
-            if (v->kind == ATRI_IR_RETURN) { fprintf(s, "    ret %s %%%zu\n", atri_ir_type_name(v->type, type_name), v->left); continue; }
-            if (v->kind == ATRI_IR_STORE) { fprintf(s, "    store %s %%%zu, %%%zu\n", atri_ir_type_name(v->type, type_name), v->right, v->left); continue; }
+            if (v->kind == ATRI_IR_RETURN) { fprintf(s, "    ret %s %%%zu\n", atri_ir_type_name(p, v->type, type_name), v->left); continue; }
+            if (v->kind == ATRI_IR_STORE) { fprintf(s, "    store %s %%%zu, %%%zu\n", atri_ir_type_name(p, v->type, type_name), v->right, v->left); continue; }
             if (v->kind == ATRI_IR_LABEL) { fprintf(s, "block%" PRIu64 ":\n", v->immediate); continue; }
             if (v->kind == ATRI_IR_JUMP) { fprintf(s, "    jump block%zu\n", v->target); continue; }
             if (v->kind == ATRI_IR_BRANCH) { fprintf(s, "    branch %%%zu, block%zu, block%zu\n", v->left, v->target, v->alternative); continue; }
@@ -219,41 +245,44 @@ void atri_dump_ir(FILE *s, AtriSource source, const AtriIRProgram *p) {
             if (v->kind == ATRI_IR_CALL && v->type == ATRI_IR_VOID) { fputs("    ", s); }
             else { fprintf(s, "    %%%zu = ", i); }
             switch (v->kind) {
-                case ATRI_IR_PARAM: fprintf(s, "param %s %" PRIu64, atri_ir_type_name(v->type, type_name), v->immediate); break;
+                case ATRI_IR_PARAM: fprintf(s, "param %s %" PRIu64, atri_ir_type_name(p, v->type, type_name), v->immediate); break;
                 case ATRI_IR_CONST:
                     if (atri_ir_is_pointer(v->type)) {
-                        fprintf(s, "const %s null", atri_ir_type_name(v->type, type_name));
+                        fprintf(s, "const %s null", atri_ir_type_name(p, v->type, type_name));
                     } else if (v->type == ATRI_IR_U64) {
                         fprintf(s, "const u64 %" PRIu64, v->immediate);
                     } else {
-                        fprintf(s, "const %s %" PRId64, atri_ir_type_name(v->type, type_name),
+                        fprintf(s, "const %s %" PRId64, atri_ir_type_name(p, v->type, type_name),
                                  atri_integer_is_signed(v->type) ? atri_integer_signed(v->type, v->immediate) : (int64_t)v->immediate);
                     }
                     break;
-                case ATRI_IR_ZERO: fprintf(s, "zero %s", atri_ir_type_name(v->type, type_name)); break;
-                case ATRI_IR_INDEX: fprintf(s, "index_location %s %%%zu, %%%zu", atri_ir_type_name(v->type, type_name), v->left, v->right); break;
-                case ATRI_IR_FIELD: fprintf(s, "field_location %s %%%zu field %" PRIu64, atri_ir_type_name(v->type, type_name), v->left, v->immediate); break;
+                case ATRI_IR_ZERO: fprintf(s, "zero %s", atri_ir_type_name(p, v->type, type_name)); break;
+                case ATRI_IR_INDEX: fprintf(s, "index_location %s %%%zu, %%%zu", atri_ir_type_name(p, v->type, type_name), v->left, v->right); break;
+                case ATRI_IR_FIELD: fprintf(s, "field_location %s %%%zu field %" PRIu64, atri_ir_type_name(p, v->type, type_name), v->left, v->immediate); break;
                 case ATRI_IR_LOCAL:
-                    if (v->immediate) { fprintf(s, "global_location %s @global.%" PRIu64, atri_ir_type_name(v->type, type_name), v->immediate-1); }
-                    else { fprintf(s, "local %s", atri_ir_type_name(v->type, type_name)); }
+                    if (v->immediate) { fprintf(s, "global_location %s @global.%" PRIu64, atri_ir_type_name(p, v->type, type_name), v->immediate-1); }
+                    else { fprintf(s, "local %s", atri_ir_type_name(p, v->type, type_name)); }
                     break;
-                case ATRI_IR_STRING: fprintf(s, "string *u8 @str.%" PRIu64, v->immediate); break;
-                case ATRI_IR_ADDRESS: fprintf(s, "address %s %%%zu", atri_ir_type_name(v->type, type_name), v->left); break;
-                case ATRI_IR_LOAD: fprintf(s, "load %s %%%zu", atri_ir_type_name(v->type, type_name), v->left); break;
+                case ATRI_IR_STRING: fprintf(s, "%s @str.%" PRIu64, p->strings[v->immediate].view ? "string" : "string *u8", v->immediate); break;
+                case ATRI_IR_ADDRESS: fprintf(s, "address %s %%%zu", atri_ir_type_name(p, v->type, type_name), v->left); break;
+                case ATRI_IR_LOAD: fprintf(s, "load %s %%%zu", atri_ir_type_name(p, v->type, type_name), v->left); break;
                 case ATRI_IR_C_PROMOTE: fprintf(s, "c_promote i32 %%%zu", v->left); break;
-                case ATRI_IR_CAST: fprintf(s, "cast %s %%%zu", atri_ir_type_name(v->type, type_name), v->left); break;
-                case ATRI_IR_UNARY: fprintf(s, "%s %s %%%zu", ops[v->op], atri_ir_type_name(v->type, type_name), v->left); break;
-                case ATRI_IR_COMPARE: fprintf(s, "cmp_%s %s %%%zu, %%%zu", ops[v->op], atri_ir_type_name(f->instructions[v->left].type, type_name), v->left, v->right); break;
-                case ATRI_IR_BINARY: fprintf(s, "%s %s %%%zu, %%%zu", ops[v->op], atri_ir_type_name(v->type, type_name), v->left, v->right); break;
-                case ATRI_IR_PTR_OFFSET: fprintf(s, "ptr_%s %s %%%zu, %%%zu, stride %zu", v->op == ATRI_ADD ? "add" : "sub", atri_ir_type_name(v->type, type_name), v->left, v->right, atri_ir_type_size(p, atri_ir_pointee(v->type))); break;
+                case ATRI_IR_CAST: fprintf(s, "cast %s %%%zu", atri_ir_type_name(p, v->type, type_name), v->left); break;
+                case ATRI_IR_UNARY: fprintf(s, "%s %s %%%zu", ops[v->op], atri_ir_type_name(p, v->type, type_name), v->left); break;
+                case ATRI_IR_COMPARE: fprintf(s, "cmp_%s %s %%%zu, %%%zu", ops[v->op], atri_ir_type_name(p, f->instructions[v->left].type, type_name), v->left, v->right); break;
+                case ATRI_IR_BINARY: fprintf(s, "%s %s %%%zu, %%%zu", ops[v->op], atri_ir_type_name(p, v->type, type_name), v->left, v->right); break;
+                case ATRI_IR_PTR_OFFSET: fprintf(s, "ptr_%s %s %%%zu, %%%zu, stride %zu", v->op == ATRI_ADD ? "add" : "sub", atri_ir_type_name(p, v->type, type_name), v->left, v->right, atri_ir_type_size(p, atri_ir_pointee(v->type))); break;
                 case ATRI_IR_PTR_DIFF: fprintf(s, "ptr_diff i64 %%%zu, %%%zu, stride %zu", v->left, v->right, atri_ir_type_size(p, atri_ir_pointee(f->instructions[v->left].type))); break;
                 case ATRI_IR_CALL: {
                     AtriSpan name = p->functions[v->callee].name;
-                    fprintf(s, "call %s @%.*s(", atri_ir_type_name(v->type, type_name), (int)(name.end - name.start), source.text + name.start);
+                    if (v->procedure) { fprintf(s, "call %s %%%zu(", atri_ir_type_name(p, v->type, type_name), v->procedure-1); }
+                    else { fprintf(s, "call %s @%.*s(", atri_ir_type_name(p, v->type, type_name), (int)(name.end - name.start), source.text + name.start); }
                     for (size_t a = 0; a < v->argument_count; ++a)
                         fprintf(s, "%s%%%zu", a == 0 ? "" : ", ", f->arguments[v->first_argument + a]);
                     fputc(')', s); break;
                 }
+                case ATRI_IR_CONTEXT: fputs("context", s); break;
+                case ATRI_IR_FUNCTION: fprintf(s, "function @%zu", v->callee); break;
                 default: break;
             }
             fputc('\n', s);
@@ -303,13 +332,17 @@ bool atri_runtime_symbols(AtriSource source, const AtriIRProgram *p, AtriLiveSym
             const AtriIRInst *inst = &f->instructions[i];
             if (inst->kind == ATRI_IR_STRING) { live->strings[inst->immediate] = true; }
             if (inst->kind == ATRI_IR_LOCAL && inst->immediate) { live->globals[inst->immediate - 1] = true; }
-            if (inst->kind == ATRI_IR_CALL && !reachable[inst->callee]) {
+            if (((inst->kind == ATRI_IR_CALL && !inst->procedure) || inst->kind == ATRI_IR_FUNCTION) && !reachable[inst->callee]) {
                 reachable[inst->callee] = true;
                 pending[pending_count++] = inst->callee;
             }
         }
     }
     free(pending);
+    for (size_t g = 0; g < p->global_count; ++g) {
+        if (!live->globals[g]) { continue; }
+        for (size_t i = 0; i < p->globals[g].string_count; ++i) { live->strings[p->globals[g].strings[i].literal] = true; }
+    }
     live->functions = reachable;
     return true;
 }

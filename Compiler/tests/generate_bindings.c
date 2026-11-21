@@ -52,7 +52,9 @@ static void emit_struct(FILE *header, const TestIR *ir, size_t index, bool *emit
         const AtriIRField *field = &ir->program.fields[t->first_field+i];
         AtriIRType element = field->type;
         while (atri_ir_is_array(element)) { element = ir->program.arrays[element-ATRI_IR_ARRAY].element; }
-        fprintf(header, "    %s %.*s", c_type(&ir->program, element), (int)(field->name.end-field->name.start), ir->source.text+field->name.start);
+        fprintf(header, "    %s ", c_type(&ir->program, element));
+        if (field->builtin_name) { fputs(field->builtin_name, header); }
+        else { fprintf(header, "%.*s", (int)(field->name.end-field->name.start), ir->source.text+field->name.start); }
         for (AtriIRType type = field->type; atri_ir_is_array(type); type = ir->program.arrays[type-ATRI_IR_ARRAY].element) {
             fprintf(header, "[%zu]", ir->program.arrays[type-ATRI_IR_ARRAY].length);
         }
@@ -78,6 +80,7 @@ int main(int argc, char **argv) {
     }
     for (size_t i = 0; i < test.before.program.struct_count; ++i) { emit_struct(header, &test.before, i, emitted); }
     free(emitted);
+    fputs("static void *atri_test_context[2];\n", header);
     for (size_t i = 0; i < test.before.program.function_count; ++i) {
         const AtriIRFunction *function = &test.before.program.functions[i];
         if (function->external_c) {
@@ -85,12 +88,14 @@ int main(int argc, char **argv) {
         }
         int length = (int)(function->name.end-function->name.start);
         const char *name = test.before.source.text+function->name.start;
-        fprintf(header, "#define atri_test_%.*s atri_fn_%zu\n", length, name, i);
-        fprintf(header, "extern %s atri_test_%.*s(", c_type(&test.before.program, function->return_type), length, name);
+        fprintf(header, "extern %s atri_fn_%zu(", c_type(&test.before.program, function->return_type), i);
         if (!function->parameter_count) fputs("void", header);
         for (size_t a = 0; a < function->parameter_count; ++a)
             fprintf(header, "%s%s", a ? ", " : "", c_type(&test.before.program, function->parameter_types[a]));
         fputs(");\n", header);
+        fprintf(header, "#define atri_test_%.*s(...) atri_fn_%zu(__VA_ARGS__", length, name, i);
+        if (function->has_context) { fputs(" __VA_OPT__(,) atri_test_context", header); }
+        fputs(")\n", header);
     }
     bool ok = !ferror(header);
     if (fclose(header) != 0) ok = false;

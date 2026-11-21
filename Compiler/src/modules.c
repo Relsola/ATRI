@@ -82,8 +82,45 @@ char *atri_canonical_path(const char *path) {
 #endif
 }
 
+bool atri_standard_import(const char *text, AtriSpan span) {
+    return span.end-span.start >= 7 && !memcmp(text+span.start+1, "std::", 5);
+}
+
 char *atri_import_path(const char *parent, const char *text, AtriSpan span) {
     if (span.end <= span.start + 2 || text[span.start+1] == '/') { return NULL; }
+    const char *name = text + span.start + 1;
+    size_t name_size = span.end - span.start - 2;
+    if (atri_standard_import(text, span)) {
+        name += 5;
+        name_size -= 5;
+        if (!name_size) { return NULL; }
+        for (size_t i = 0; i < name_size; ++i) {
+            char c = name[i];
+            if (!(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') &&
+                !(c >= '0' && c <= '9') && c != '_') { return NULL; }
+        }
+#ifdef _WIN32
+        char directory[32768];
+        DWORD n = GetModuleFileNameA(NULL, directory, sizeof(directory));
+        if (!n || n >= sizeof(directory)) { return NULL; }
+        char *slash = strrchr(directory, '\\');
+        if (!slash) { return NULL; }
+        *slash = 0;
+        const char *suffix = "/stdlib/";
+#else
+        const char *directory = ATRI_STDLIB_DIR, *suffix = "/";
+#endif
+        size_t prefix = strlen(directory) + strlen(suffix);
+        char *path = malloc(prefix + name_size + 4);
+        if (path) {
+            memcpy(path, directory, strlen(directory));
+            memcpy(path + strlen(directory), suffix, strlen(suffix));
+            memcpy(path + prefix, name, name_size);
+            memcpy(path + prefix + name_size, ".ar", 4);
+        }
+        return path;
+    }
+    if (!strcmp(parent, "<stdin>")) { return NULL; }
     for (size_t i = span.start + 1; i < span.end - 1; ++i) {
         if (text[i] == '\\' || text[i] == ':') { return NULL; }
     }
@@ -121,9 +158,6 @@ static bool load(Loader *loader, char *path, char *text, size_t length, size_t d
         if (token.kind == ATRI_TOKEN_ERROR) { continue; }
         if (token.kind == ATRI_TOKEN_EOF) { return true; }
         if (token.kind != ATRI_TOKEN_IMPORT) { continue; }
-        if (!strcmp(path, "<stdin>")) {
-            *loader->diagnostic = (AtriDiagnostic){.span = token.span, .message = "relative imports require a source file path"}; return false;
-        }
         token = atri_lexer_next(&lexer, loader->diagnostic);
         if (token.kind != ATRI_TOKEN_STRING) {
             *loader->diagnostic = (AtriDiagnostic){.span = {module.span.start + token.span.start, module.span.start + token.span.end}, .message = "expected a module path"};
@@ -133,7 +167,9 @@ static bool load(Loader *loader, char *path, char *text, size_t length, size_t d
         char *resolved = candidate ? atri_canonical_path(candidate) : NULL;
         free(candidate);
         if (!resolved) {
-            *loader->diagnostic = (AtriDiagnostic){.span = {module.span.start + token.span.start, module.span.start + token.span.end}, .message = "cannot resolve relative .ar module path"};
+            const char *message = atri_standard_import(text, token.span) ? "cannot resolve standard library module" :
+                !strcmp(path, "<stdin>") ? "relative imports require a source file path" : "cannot resolve relative .ar module path";
+            *loader->diagnostic = (AtriDiagnostic){.span = {module.span.start + token.span.start, module.span.start + token.span.end}, .message = message};
             return false;
         }
         bool found = false;
@@ -170,6 +206,17 @@ static bool load(Loader *loader, char *path, char *text, size_t length, size_t d
         if (!ok) { free(bytes); free(resolved); return false; }
         if (!load(loader, resolved, bytes, count-1, depth+1)) { return false; }
     }
+}
+
+AtriId atri_standard_module(AtriSource source, const AtriProgram *program, const char *path) {
+    size_t length = strlen(path);
+    for (size_t i = 0; i < program->import_count; ++i) {
+        AtriSpan name = program->imports[i].path;
+        if (name.end - name.start == length + 2 && !memcmp(source.text + name.start + 1, path, length)) {
+            return program->imports[i].target;
+        }
+    }
+    return ATRI_NONE;
 }
 
 AtriId atri_module_at(const AtriProgram *program, size_t offset) {

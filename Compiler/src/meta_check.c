@@ -13,6 +13,18 @@ static size_t declaration_at(const AtriProgram *p, size_t offset) {
     }
     return first;
 }
+static AtriId library_declaration(AtriSource source, const AtriProgram *p, const char *path, const char *name, unsigned kind) {
+    AtriId module = atri_standard_module(source, p, path);
+    if (module == ATRI_NONE) { return ATRI_NONE; }
+    size_t length = strlen(name);
+    for (size_t i = 0; i < p->declaration_count; ++i) {
+        const AtriDeclaration *decl = &p->declarations[i];
+        AtriSpan s = decl->name;
+        if (decl->kind == kind && s.end-s.start == length && !memcmp(source.text+s.start, name, length) &&
+            atri_module_at(p, s.start) == module) { return i; }
+    }
+    return ATRI_NONE;
+}
 
 /* 先用模块可见名称保守地取依赖闭包，再交给原降低器精确判型。
  * 同名局部可能多纳入一个声明。此索引只控制检查范围，不决定名称绑定。 */
@@ -20,17 +32,31 @@ static void dependencies(AtriSource source, const AtriProgram *p, size_t root, b
     size_t count = 1;
     pending[0] = root;
     selected[root] = true;
+    AtriId context = library_declaration(source, p, "std::mem", "Context", ATRI_META_STRUCT);
+    AtriId list = library_declaration(source, p, "std::list", "Storage", ATRI_META_STRUCT);
+    AtriId procedure = library_declaration(source, p, "std::mem", "ResizeProc", ATRI_META_STRUCT);
+    AtriId resize = library_declaration(source, p, "std::mem", "c_resize", ATRI_META_FUNCTION);
     for (size_t head = 0; head < count; ++head) {
+        /* 间接调用从 c_resize 取得已验证的签名，即使生成器只调用用户提供的过程。 */
+        if (pending[head] == procedure && resize != ATRI_NONE && !selected[resize]) {
+            selected[resize] = true;
+            pending[count++] = resize;
+        }
         AtriSpan span = p->declarations[pending[head]].span;
         AtriLexer lexer = atri_lexer_create(source);
         lexer.offset = span.start;
         lexer.source.length = span.end;
-        AtriToken previous = {0}, before = {0};
+        AtriToken previous = {0}, before = {0}, earlier = {0};
         for (;;) {
             AtriDiagnostic ignored;
             AtriToken token = atri_lexer_next(&lexer, &ignored);
             if (token.kind == ATRI_TOKEN_EOF || token.kind == ATRI_TOKEN_ERROR) { break; }
             if (token.kind == ATRI_TOKEN_IDENTIFIER && previous.kind != ATRI_TOKEN_DOT) {
+                size_t length = token.span.end-token.span.start;
+                const char *word = source.text+token.span.start;
+                AtriId implicit = length == 7 && !memcmp(word, "context", 7) ? context :
+                    length == 4 && !memcmp(word, "list", 4) ? list : ATRI_NONE;
+                if (implicit != ATRI_NONE && !selected[implicit]) { selected[implicit] = true; pending[count++] = implicit; }
                 AtriSpan qualifier = previous.kind == ATRI_TOKEN_SCOPE ? before.span : (AtriSpan){0};
                 AtriSpan name = atri_declaration_name(source, p, token.span, qualifier);
                 if (name.end) {
@@ -39,13 +65,15 @@ static void dependencies(AtriSource source, const AtriProgram *p, size_t root, b
                         unsigned kind = p->declarations[id].kind;
                         AtriLexer look = lexer;
                         bool call = kind == ATRI_META_FUNCTION &&
-                            atri_lexer_next(&look, &ignored).kind == ATRI_TOKEN_LEFT_PAREN;
+                            (atri_lexer_next(&look, &ignored).kind == ATRI_TOKEN_LEFT_PAREN ||
+                             previous.kind == ATRI_TOKEN_AMPERSAND || (qualifier.end && earlier.kind == ATRI_TOKEN_AMPERSAND));
                         if (call || kind == ATRI_META_STRUCT || kind == ATRI_META_UNION || kind == ATRI_META_ENUM) {
                             selected[id] = true; pending[count++] = id;
                         }
                     }
                 }
             }
+            earlier = before;
             before = previous;
             previous = token;
         }

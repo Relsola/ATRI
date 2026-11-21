@@ -2,12 +2,13 @@
 #include <stdio.h>
 #include <string.h>
 
-__declspec(dllexport) int32_t atri_register_v1(void) {
+#pragma comment(linker, "/export:register=register_syntax")
+int32_t register_syntax(void) {
     return !(atri_register_annotation("left") && atri_register_infix("left", "<>", 19, 0) &&
              atri_register_annotation("right") && atri_register_infix("right", "<>", 19, 1));
 }
 
-__declspec(dllexport) int32_t atri_on_decl_v1(uint64_t decl, uint32_t kind, const char *module,
+__declspec(dllexport) int32_t message(uint64_t decl, uint32_t kind, const char *module,
         const char *name, const char *source, const char **replacement, const char **injection) {
     (void)kind;
     (void)module;

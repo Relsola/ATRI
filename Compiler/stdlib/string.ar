@@ -1,0 +1,86 @@
+import "std::list";
+mem :: import "std::mem";
+#extern(C) fn strlen(s: *u8) -> u64;
+#extern(C) fn memcpy(dst: *void, src: *void, bytes: u64) -> *void;
+
+export fn from_c(s: *u8) -> string {
+    if (s == null) { return {}; }
+    return {.data = s, .len = strlen(s)};
+}
+
+export fn view(bytes: *list(u8)) -> string {
+    return {.data = (*bytes).data, .len = (*bytes).len};
+}
+
+export fn equal(a: string, b: string) -> bool {
+    if (a.len != b.len) { return false; }
+    for (i: u64 = 0; i < a.len; i += 1) {
+        if (a[i] != b[i]) { return false; }
+    }
+    return true;
+}
+
+// Half-open byte range. An invalid range leaves out unchanged.
+export fn slice(s: string, begin: u64, end: u64, out: *string) -> bool {
+    if (begin > end || end > s.len) { return false; }
+    start: *u8 = s.data;
+    if (begin != 0) { start += cast(i64, begin); }
+    *out = {.data = start, .len = end - begin};
+    return true;
+}
+
+export fn find(s: string, needle: string) -> i64 {
+    if (needle.len == 0) { return 0; }
+    if (needle.len > s.len) { return -1; }
+    for (i: u64 = 0; i <= s.len - needle.len; i += 1) {
+        part: string = {.data = s.data + cast(i64, i), .len = needle.len};
+        if (equal(part, needle)) { return cast(i64, i); }
+    }
+    return -1;
+}
+
+// Keep the old storage live until all source views have been copied, including views into out.
+fn copy_parts(parts: *string, count: u64, terminate: bool, out: *list(u8)) -> bool {
+    size: u64 = 0;
+    if (terminate) { size = 1; }
+    for (i: u64 = 0; i < count; i += 1) {
+        n: u64 = (*(parts + cast(i64, i))).len;
+        if (n > 0x7fff_ffff_ffff_ffff - size) { return false; }
+        size += n;
+    }
+    bytes: list(u8);
+    if (size != 0) {
+        bytes.data = cast(*u8, mem::alloc(size));
+        if (bytes.data == null) { return false; }
+        bytes.cap = size;
+        bytes.len = size;
+        bytes.owner = (*context).allocator;
+        offset: i64 = 0;
+        for (i: u64 = 0; i < count; i += 1) {
+            s: string = *(parts + cast(i64, i));
+            if (s.len != 0) {
+                memcpy(cast(*void, bytes.data + offset), cast(*void, s.data), s.len);
+                offset += cast(i64, s.len);
+            }
+        }
+        if (terminate) { *(bytes.data + offset) = 0; }
+    }
+    release(out);
+    *out = bytes;
+    return true;
+}
+
+export fn join(parts: *string, count: u64, out: *list(u8)) -> bool {
+    return copy_parts(parts, count, false, out);
+}
+
+export fn concat(left: string, right: string, out: *list(u8)) -> bool {
+    parts: [2]string = {left, right};
+    return join(&parts[0], 2, out);
+}
+
+export fn to_c(s: string, out: *list(u8)) -> bool {
+    if (find(s, "\0") >= 0) { return false; }
+    part: string = s;
+    return copy_parts(&part, 1, true, out);
+}

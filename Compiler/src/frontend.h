@@ -128,7 +128,7 @@ typedef struct {
 /* 节点以稳定 ID 互相引用，扩容不使引用失效；块的语句范围指向 block_statements 边数组。 */
 typedef struct {
     struct AtriRunCache *run_cache;
-    bool owns_run_cache, generator_scope;
+    bool owns_run_cache, generator_scope, plugin;
     AtriId keyword_function; /* 插件宿主函数下标加一，普通程序为零。 */
     AtriDeclaration *declarations; /* 仅在监听声明时按源码顺序记录，含 export 和可选分号。 */
     size_t declaration_count;
@@ -197,6 +197,7 @@ bool atri_load_sources(AtriSource input, const AtriSource *overlays, size_t over
 /* 成功后 AST 持有有序名称表，表项借用同一份 source 的字节；失败可重试。 */
 bool atri_prepare_symbols(AtriSource source, AtriProgram *program, AtriDiagnostic *diagnostic);
 AtriId atri_module_at(const AtriProgram *program, size_t offset);
+AtriId atri_standard_module(AtriSource source, const AtriProgram *program, const char *path);
 /* 直接查询 AST 中的名称前须完成符号表准备。atri_load_program 和 atri_lower 会代为准备。 */
 AtriId atri_find_declaration(AtriSource source, const AtriProgram *program, size_t offset,
                              AtriSpan name, AtriSpan qualifier, bool *global);

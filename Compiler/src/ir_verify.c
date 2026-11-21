@@ -83,6 +83,9 @@ static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, Atr
         return bad(d, f->name, "IR verifier: invalid function signature");
     for (size_t a = 0; a < f->parameter_count; ++a)
         if (!atri_ir_valid_type(p, f->parameter_types[a])) return bad(d, f->name, "IR verifier: invalid parameter type");
+    if (f->has_context && (f->external_c || !f->parameter_count || f->parameter_types[f->parameter_count-1] != ATRI_IR_PTR_VOID)) {
+        return bad(d, f->name, "IR verifier: invalid implicit context parameter");
+    }
     if (f->variadic && !f->external_c) { return bad(d, f->name, "IR verifier: variadic definitions are not supported"); }
     if (f->constant_count) return bad(d, f->name, "IR verifier: unresolved compile-time constants");
     if (f->external_c) {
@@ -195,9 +198,13 @@ static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, Atr
                     !(v->type == ATRI_IR_BOOL && v->immediate > 1) &&
                     !(atri_ir_is_pointer(v->type) && v->immediate != 0); break;
             case ATRI_IR_STRING:
-                valid = v->type == ATRI_IR_PTR_U8 && v->immediate < p->string_count; break;
+                valid = v->immediate < p->string_count && v->type == (p->strings[v->immediate].view ? p->string_type : ATRI_IR_PTR_U8); break;
             case ATRI_IR_PARAM:
                 valid = c.use_block == 0 && v->immediate < f->parameter_count && v->type == f->parameter_types[v->immediate]; break;
+            case ATRI_IR_CONTEXT: valid = v->type == ATRI_IR_PTR_VOID || v->type == p->context_pointer; break;
+            case ATRI_IR_FUNCTION:
+                valid = v->type == p->resize_pointer && v->callee < p->function_count && atri_ir_allocator_callback(&p->functions[v->callee]);
+                break;
             case ATRI_IR_C_PROMOTE:
                 valid = v->type == ATRI_IR_I32 && v->left < i &&
                     (f->instructions[v->left].type == ATRI_IR_BOOL || (atri_ir_is_integer(f->instructions[v->left].type) && atri_integer_width(f->instructions[v->left].type) < 32)) &&
@@ -250,6 +257,10 @@ static bool verify_function(const AtriIRProgram *p, const AtriIRFunction *f, Atr
                         if (!operand(&c, i, arg, p->functions[v->callee].parameter_types[a])) { valid = false; }
                     } else if (arg >= i || !operand(&c, i, arg, f->instructions[arg].type) ||
                         !variadic_value(p, f->instructions[arg].type, 0)) { valid = false; }
+                }
+                if (valid && v->procedure) {
+                    valid = v->callee == p->resize_function && atri_ir_allocator_callback(&p->functions[v->callee]) &&
+                        operand(&c, i, v->procedure-1, p->resize_pointer);
                 }
                 break;
             default: valid = false; break;
@@ -350,10 +361,31 @@ bool atri_ir_verify(const AtriIRProgram *p, AtriDiagnostic *d) {
             return bad(d, t->name, "IR verifier: inconsistent struct size or alignment");
         }
     }
+    if (p->string_count && !p->strings) { return bad(d, (AtriSpan){0}, "IR verifier: missing string data"); }
+    for (size_t i = 0; i < p->string_count; ++i) {
+        const AtriIRString *s = &p->strings[i];
+        if (!s->bytes || (!s->view && s->bytes[s->length] != 0)) {
+            return bad(d, (AtriSpan){0}, "IR verifier: missing literal data or C string terminator");
+        }
+    }
     if (p->global_count && !p->globals) { return bad(d, (AtriSpan){0}, "IR verifier: missing globals"); }
     for (size_t i = 0; i < p->global_count; ++i) {
         const AtriIRGlobal *g = &p->globals[i];
         if (!atri_ir_valid_type(p, g->type)) { return bad(d, g->name, "IR verifier: invalid global type"); }
+        if (g->constant && atri_ir_is_struct(g->type) && g->type == p->string_type) {
+            if (g->data || g->data_size || g->string_count || g->bits > p->string_count || (g->bits && !p->strings[g->bits-1].view)) {
+                return bad(d, g->name, "IR verifier: invalid string constant");
+            }
+            continue;
+        }
+        size_t end = 0;
+        for (size_t j = 0; j < g->string_count; ++j) {
+            if (!g->strings || g->strings[j].literal >= p->string_count || !p->strings[g->strings[j].literal].view || g->strings[j].offset < end ||
+                g->strings[j].offset > g->data_size || g->data_size-g->strings[j].offset < 16 || g->strings[j].offset % 8) {
+                return bad(d, g->name, "IR verifier: invalid string literal relocation");
+            }
+            end = g->strings[j].offset+16;
+        }
         if (atri_ir_is_aggregate(g->type)) {
             size_t steps = 100000;
             if (g->constant || g->bits || !g->data || g->data_size != atri_ir_type_size(p, g->type) ||
@@ -365,14 +397,6 @@ bool atri_ir_verify(const AtriIRProgram *p, AtriDiagnostic *d) {
         if (g->data || g->data_size || (atri_ir_is_integer(g->type) && g->bits > atri_integer_mask(g->type)) ||
             (g->type == ATRI_IR_BOOL && g->bits > 1) || (atri_ir_is_pointer(g->type) && g->bits != 0)) {
             return bad(d, g->name, "IR verifier: invalid global initial value");
-        }
-    }
-    if (p->string_count && !p->strings) {
-        return bad(d, (AtriSpan){0}, "IR verifier: missing string data");
-    }
-    for (size_t i = 0; i < p->string_count; ++i) {
-        if (!p->strings[i].bytes || p->strings[i].bytes[p->strings[i].length] != 0) {
-            return bad(d, (AtriSpan){0}, "IR verifier: string data must include a terminating zero byte");
         }
     }
     for (size_t i = 0; i < p->function_count; ++i) if (!verify_function(p, &p->functions[i], d)) return false;

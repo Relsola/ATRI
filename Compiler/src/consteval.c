@@ -9,6 +9,7 @@ typedef struct {
     uint64_t *values, *locals;
     unsigned char *states;
     AtriVmMemory *memory;
+    uint64_t root_context;
     size_t slots;
 } Frame;
 
@@ -46,6 +47,7 @@ static bool step(Evaluation *e, AtriSpan span) {
 }
 static void destroy_frame(Frame *frame) {
     if (frame) {
+        if (frame->root_context) { atri_vm_drop(frame->memory, frame->root_context); }
         for (size_t i = 0; frame->locals && i < frame->slots; ++i) {
             if (frame->locals[i]) { atri_vm_drop(frame->memory, frame->locals[i]); }
         }
@@ -103,6 +105,7 @@ typedef struct {
     char *path;
     size_t owner, site, ordinal;
     AtriIRType type;
+    bool view;
     uint64_t bits;
     unsigned char *bytes;
     size_t size;
@@ -120,13 +123,14 @@ static SavedRun run_key(const Evaluation *e, AtriId id, size_t ordinal) {
     const AtriIRConstant *c = &f->constants[ordinal];
     AtriModule m = ast->modules[atri_module_at(ast, c->span.start)];
     return (SavedRun){.path = m.path, .owner = f->name.start - m.span.start, .site = c->span.start - m.span.start,
-        .ordinal = ordinal, .type = f->instructions[c->result].type};
+        .ordinal = ordinal, .type = f->instructions[c->result].type,
+        .view = f->instructions[c->result].type == e->program->string_type};
 }
 static const SavedRun *find_run(const struct AtriRunCache *cache, SavedRun key) {
     for (size_t i = 0; i < cache->count; ++i) {
         const SavedRun *s = &cache->items[i];
         if (key.site == s->site && key.owner == s->owner && key.ordinal == s->ordinal &&
-            key.type == s->type && !strcmp(key.path, s->path)) { return s; }
+            key.view == s->view && (key.view || key.type == s->type) && !strcmp(key.path, s->path)) { return s; }
     }
     return NULL;
 }
@@ -139,10 +143,15 @@ static bool save_run(Evaluation *e, AtriId id, size_t ordinal) {
     char *path = malloc(strlen(item.path) + 1);
     if (path) { strcpy(path, item.path); }
     item.path = path; item.bits = c->bits;
-    if (item.type == ATRI_IR_PTR_U8 && c->bits) {
-        unsigned char *data = atri_vm_bytes(&e->memory, c->bits, 0, false);
+    const unsigned char *data = NULL;
+    if (item.view) {
+        if (!atri_vm_view(&e->memory, c->bits, &data, &item.size)) { free(path); return error(e, c->span, "expired compile-time string"); }
+    } else if (item.type == ATRI_IR_PTR_U8 && c->bits) {
+        data = atri_vm_bytes(&e->memory, c->bits, 0, false);
         if (!data) { free(path); return error(e, c->span, "expired compile-time pointer"); }
         item.size = e->memory.objects[(c->bits >> 32) - 1].size - (uint32_t)c->bits;
+    }
+    if (data) {
         item.bytes = malloc(item.size ? item.size : 1);
         if (!item.bytes) { free(path); return error(e, c->span, "out of memory storing compile-time bytes"); }
         memcpy(item.bytes, data, item.size);
@@ -166,8 +175,9 @@ static bool constant(Evaluation *e, AtriId function, AtriId index) {
     if (ast && ast->run_cache && !c->capture_owner) {
         const SavedRun *s = find_run(ast->run_cache, run_key(e, function, index));
         if (s) {
-            c->bits = s->bytes ? atri_vm_object(&e->memory, s->size, VM_LITERAL, s->bytes) : s->bits;
-            if (s->bytes && !c->bits) { return error(e, c->span, "out of memory restoring compile-time bytes"); }
+            c->bits = s->view ? atri_vm_string_literal(&e->memory, s->bytes, s->size, true) :
+                s->bytes ? atri_vm_object(&e->memory, s->size, VM_LITERAL, s->bytes) : s->bits;
+            if ((s->view || s->bytes) && !c->bits) { return error(e, c->span, "out of memory restoring compile-time bytes"); }
             c->state = 2; e->result = c->bits; return true;
         }
     }
@@ -196,10 +206,14 @@ static bool finish_value(Evaluation *e, Task *t, uint64_t result) {
 }
 static bool call(Evaluation *e, Task *t, const AtriIRInst *v, AtriSpan span) {
     const AtriIRFunction *caller = &e->program->functions[t->frame->function];
-    if (t->resume == START && v->argument_count) {
-        t->arguments = calloc(v->argument_count, sizeof(*t->arguments));
-        if (!t->arguments) {
-            return error(e, span, "out of memory during compile-time call");
+    if (t->resume == START) {
+        if (v->argument_count) {
+            t->arguments = calloc(v->argument_count, sizeof(*t->arguments));
+            if (!t->arguments) { return error(e, span, "out of memory during compile-time call"); }
+        }
+        if (v->procedure) {
+            t->resume = LEFT_READY;
+            return demand(e, t->frame, v->procedure-1);
         }
     } else if (t->resume == ARGUMENT_READY) {
         t->arguments[t->argument++] = e->result;
@@ -215,7 +229,16 @@ static bool call(Evaluation *e, Task *t, const AtriIRInst *v, AtriSpan span) {
         return finish_value(e, t, bits);
     }
     t->resume = RESULT_READY;
-    Frame *callee = create_frame(e, (AtriId)v->callee, t->arguments);
+    AtriId target = v->callee;
+    if (v->procedure) {
+        uint64_t proc = t->frame->values[v->procedure-1];
+        if (!proc || proc > e->program->function_count) { return error(e, span, "invalid allocator callback"); }
+        target = (AtriId)(proc-1);
+        if (!atri_ir_allocator_callback(&e->program->functions[target])) {
+            return error(e, span, "invalid allocator callback signature");
+        }
+    }
+    Frame *callee = create_frame(e, target, t->arguments);
     return callee && push(e, (Task){.kind = EXECUTE_BODY, .frame = callee}, span);
 }
 static bool value(Evaluation *e, Task *t) {
@@ -239,6 +262,13 @@ static bool value(Evaluation *e, Task *t) {
         return constant(e, frame->function, frame->body->constants[t->id] - 1);
     }
     switch (v->kind) {
+        case ATRI_IR_FUNCTION: return finish_value(e, t, v->callee+1);
+        case ATRI_IR_CONTEXT: {
+            const AtriIRFunction *f = &e->program->functions[frame->function];
+            if (frame->parameters && f->has_context) { return finish_value(e, t, frame->parameters[atri_explicit_parameters(f)]); }
+            if (!frame->root_context) { frame->root_context = atri_vm_object(&e->memory, 16, VM_LOCAL, NULL); }
+            return frame->root_context ? finish_value(e, t, frame->root_context) : error(e, span, "out of memory creating VM context");
+        }
         case ATRI_IR_CONST: return finish_value(e, t, v->immediate);
         case ATRI_IR_PARAM:
             if (!frame->parameters) { return error(e, span, "compile-time expression depends on a runtime parameter"); }
@@ -250,7 +280,9 @@ static bool value(Evaluation *e, Task *t) {
             }
             uint64_t *address = &e->memory.literals[v->immediate];
             const AtriIRString *str = &e->program->strings[v->immediate];
-            if (!*address) { *address = atri_vm_object(&e->memory, str->length + 1, VM_LITERAL, str->bytes); }
+            if (!*address) {
+                *address = atri_vm_string_literal(&e->memory, str->bytes, str->length, str->view);
+            }
             return *address ? finish_value(e, t, *address) : error(e, span, "out of memory loading VM literal");
         }
         case ATRI_IR_CALL: return call(e, t, v, span);
@@ -458,16 +490,26 @@ static bool materialize(Evaluation *e, const AtriIRConstant *c, AtriIRInst *resu
         return error(e, c->nonnull_use, "cannot dereference a statically known null pointer");
     }
     result->immediate = c->bits;
-    if (result->type != ATRI_IR_PTR_U8 || !c->bits) { return true; }
-    size_t length;
-    const char *bytes = atri_vm_text(&e->memory, c->bits, &length);
-    if (!bytes) { return error(e, c->span, "#run byte-string result must be live and zero terminated"); }
-    const AtriVmObject *object = &e->memory.objects[(c->bits >> 32) - 1];
-    size_t remaining = object->size - (uint32_t)c->bits;
-    /* 字节指针还可以索引内嵌零之后的内容，整个剩余区间都要保留。 */
-    AtriIRString data = {.length = remaining - (bytes[remaining - 1] == 0)};
-    data.bytes = calloc(data.length + 1, 1);
-    if (data.bytes) { memcpy(data.bytes, bytes, data.length); }
+    AtriIRString data = {.view = result->type == e->program->string_type};
+    const unsigned char *bytes;
+    if (data.view) {
+        if (!atri_vm_view(&e->memory, c->bits, &bytes, &data.length)) { return error(e, c->span, "#run string refers to expired or invalid bytes"); }
+        if (!bytes) { result->kind = ATRI_IR_ZERO; result->immediate = 0; return true; }
+    } else {
+        if (result->type != ATRI_IR_PTR_U8 || !c->bits) { return true; }
+        size_t length;
+        bytes = (const unsigned char *)atri_vm_text(&e->memory, c->bits, &length);
+        if (!bytes) { return error(e, c->span, "#run byte-string result must be live and zero terminated"); }
+        const AtriVmObject *object = &e->memory.objects[(c->bits >> 32) - 1];
+        size_t remaining = object->size - (uint32_t)c->bits;
+        data.length = remaining - (bytes[remaining - 1] == 0);
+    }
+    size_t size = data.length + !data.view;
+    data.bytes = malloc(size ? size : 1);
+    if (data.bytes) {
+        memcpy(data.bytes, bytes, data.length);
+        if (!data.view) { data.bytes[data.length] = 0; }
+    }
     AtriIRProgram *p = e->program;
     result->kind = ATRI_IR_STRING;
     result->immediate = p->string_count;
@@ -518,9 +560,13 @@ bool atri_vm_generate(AtriIRProgram *p, AtriVmFunction *functions, AtriId id, co
     Evaluation e = {.program = p, .diagnostic = d, .functions = functions, .remaining_steps = 100000};
     uint64_t *values = calloc(f->parameter_count + 1, sizeof(*values));
     bool ok = values != NULL;
-    for (size_t i = 0; ok && i < f->parameter_count; ++i) {
+    if (ok && f->has_context) {
+        values[atri_explicit_parameters(f)] = atri_vm_object(&e.memory, 16, VM_LOCAL, NULL);
+        ok = values[atri_explicit_parameters(f)] != 0;
+    }
+    for (size_t i = 0; ok && i < atri_explicit_parameters(f); ++i) {
         if (args[i].text) {
-            values[i] = atri_vm_object(&e.memory, args[i].length + 1, VM_LITERAL, args[i].text);
+            values[i] = atri_vm_string_literal(&e.memory, args[i].text, args[i].length, f->parameter_types[i] == p->string_type);
             ok = values[i] != 0;
         } else { values[i] = args[i].bits; }
     }
@@ -528,11 +574,18 @@ bool atri_vm_generate(AtriIRProgram *p, AtriVmFunction *functions, AtriId id, co
     Frame *frame = ok ? create_frame(&e, id, values) : NULL;
     ok = frame && push(&e, (Task){.kind = EXECUTE_BODY, .frame = frame}, f->name) && drive(&e);
     if (ok) {
-        const char *src = atri_vm_text(&e.memory, e.result, length);
-        if (!src) { ok = error(&e, f->name, "generator returned a null, expired or unterminated source string"); }
-        else {
+        const unsigned char *src = NULL;
+        if (f->return_type == p->string_type) {
+            ok = atri_vm_view(&e.memory, e.result, &src, length);
+            if (ok && *length && memchr(src, 0, *length)) { ok = error(&e, f->name, "generated source contains a zero byte"); }
+        } else {
+            src = (const unsigned char *)atri_vm_text(&e.memory, e.result, length);
+            ok = src != NULL;
+        }
+        if (!ok && !d->message) { error(&e, f->name, "generator returned a null, expired or unterminated source string"); }
+        if (ok) {
             *text = malloc(*length + 1);
-            if (*text) { memcpy(*text, src, *length + 1); }
+            if (*text) { if (*length) { memcpy(*text, src, *length); } (*text)[*length] = 0; }
             else { ok = error(&e, f->name, "out of memory copying generated source"); }
         }
     }

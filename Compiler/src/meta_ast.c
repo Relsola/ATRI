@@ -47,12 +47,11 @@ static const char *spelling(AtriSpan span) {
     }
     return remember(s);
 }
-ATRI_HOST_EXPORT int32_t atri_ast_has_annotation(uint64_t decl, const char *name) {
+ATRI_HOST_EXPORT int32_t atri_ast_has_annotation_bytes(uint64_t decl, const char *name, uint64_t size) {
     if (!active || decl != active->event || !name) {
         return 0;
     }
     const AtriDeclaration *item = &active->ast->declarations[0];
-    size_t size = strlen(name);
     for (size_t i = 0; i < item->annotation_count; ++i) {
         AtriSpan at = active->ast->annotations[item->first_annotation + i];
         if (at.end - at.start == size && !memcmp(active->source.text + at.start, name, size)) {
@@ -60,6 +59,9 @@ ATRI_HOST_EXPORT int32_t atri_ast_has_annotation(uint64_t decl, const char *name
         }
     }
     return 0;
+}
+ATRI_HOST_EXPORT int32_t atri_ast_has_annotation(uint64_t decl, const char *name) {
+    return name ? atri_ast_has_annotation_bytes(decl, name, strlen(name)) : 0;
 }
 static bool unary(const AtriExpr *e) {
     return e->kind == ATRI_EXPR_UNARY || e->kind == ATRI_EXPR_ADDRESS || e->kind == ATRI_EXPR_DEREFERENCE;

@@ -70,6 +70,7 @@ static bool can_optimize(const AtriIRFunction *f, bool for_inlining) {
         if (!for_inlining || inst->kind == ATRI_IR_NOP) {
             continue;
         }
+        if (inst->kind == ATRI_IR_CONTEXT && !f->has_context) { return false; }
         ++active;
         if (active > 64 || inst->kind == ATRI_IR_CALL || inst->kind == ATRI_IR_LOCAL ||
             inst->kind == ATRI_IR_LOAD || inst->kind == ATRI_IR_STORE) {
@@ -88,6 +89,7 @@ static bool inline_leaf(const AtriIRProgram *p, AtriIRFunction *out, const AtriI
         AtriIRInst inst = callee->instructions[i];
         if (inst.kind == ATRI_IR_NOP) continue;
         if (inst.kind == ATRI_IR_PARAM) { map[i] = arguments[inst.immediate]; continue; }
+        if (inst.kind == ATRI_IR_CONTEXT && callee->has_context) { map[i] = arguments[callee->parameter_count-1]; continue; }
         if (inst.kind == ATRI_IR_RETURN) { *value = map[inst.left]; break; }
         if (inst.kind == ATRI_IR_BINARY || inst.kind == ATRI_IR_COMPARE) { inst.left = map[inst.left]; inst.right = map[inst.right]; }
         if (inst.kind == ATRI_IR_PTR_OFFSET || inst.kind == ATRI_IR_PTR_DIFF) {
@@ -112,6 +114,7 @@ static bool eliminate_dead(AtriIRFunction *f, AtriDiagnostic *d) {
             v->kind == ATRI_IR_PTR_OFFSET || v->kind == ATRI_IR_PTR_DIFF) live[v->left] = true;
         if (v->kind == ATRI_IR_BINARY || v->kind == ATRI_IR_STORE || v->kind == ATRI_IR_COMPARE ||
             v->kind == ATRI_IR_PTR_OFFSET || v->kind == ATRI_IR_PTR_DIFF) live[v->right] = true;
+        if (v->kind == ATRI_IR_CALL && v->procedure) { live[v->procedure-1] = true; }
         if (v->kind == ATRI_IR_CALL)
             for (size_t a = 0; a < v->argument_count; ++a) live[f->arguments[v->first_argument + a]] = true;
     }
@@ -130,7 +133,7 @@ bool atri_optimize(AtriIRProgram *p, bool inline_functions, AtriDiagnostic *d) {
                 continue;
             }
             AtriIRFunction out = {.name = old->name, .module = old->module, .parameter_count = old->parameter_count,
-                .parameter_types = old->parameter_types, .return_type = old->return_type, .block_count = 1};
+                .parameter_types = old->parameter_types, .return_type = old->return_type, .block_count = 1, .has_context = old->has_context};
             /* 压紧 NOP 和插入内联体都会改变 ID，重建每条值引用以及调用实参索引。 */
             AtriId *map = malloc(old->instruction_count * sizeof(*map));
             if (map == NULL) return diagnostic(d, old->name, "out of memory during optimization");
@@ -144,10 +147,11 @@ bool atri_optimize(AtriIRProgram *p, bool inline_functions, AtriDiagnostic *d) {
                 if (inst.kind == ATRI_IR_BINARY || inst.kind == ATRI_IR_STORE || inst.kind == ATRI_IR_COMPARE ||
                     inst.kind == ATRI_IR_PTR_OFFSET || inst.kind == ATRI_IR_PTR_DIFF) inst.right = map[inst.right];
                 if (inst.kind == ATRI_IR_CALL) {
+                    if (inst.procedure) { inst.procedure = map[inst.procedure-1]+1; }
                     AtriId *args = inst.argument_count == 0 ? NULL : malloc(inst.argument_count * sizeof(*args));
                     if (inst.argument_count != 0 && args == NULL) { ok = diagnostic(d, inst.span, "out of memory"); break; }
                     for (size_t a = 0; a < inst.argument_count; ++a) args[a] = map[old->arguments[inst.first_argument + a]];
-                    if (inline_functions && inst.callee != n && out.instruction_count < 4096 && can_optimize(&p->functions[inst.callee], true)) {
+                    if (inline_functions && !inst.procedure && inst.callee != n && out.instruction_count < 4096 && can_optimize(&p->functions[inst.callee], true)) {
                         ok = inline_leaf(p, &out, &p->functions[inst.callee], args, &map[i], d);
                         changed = true;
                     } else {

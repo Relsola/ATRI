@@ -349,6 +349,23 @@ static bool parse_type(Parser *p, AtriSpan *span, const char *message) {
         }
         --p->depth; return ok;
     }
+    if (p->current.kind == ATRI_TOKEN_IDENTIFIER && p->current.span.end - p->current.span.start == 4 &&
+        !memcmp(p->lexer.source.text + p->current.span.start, "list", 4)) {
+        AtriLexer look = p->lexer;
+        AtriDiagnostic ignored;
+        if (atri_lexer_next(&look, &ignored).kind == ATRI_TOKEN_LEFT_PAREN) {
+            advance(p);
+            advance(p);
+            AtriArrayType list = {.length = ATRI_NONE};
+            bool ok = parse_type(p, &list.element, "expected list element type");
+            span->end = p->current.span.end;
+            list.span = *span;
+            --p->depth;
+            return ok && expect(p, ATRI_TOKEN_RIGHT_PAREN, "expected ')' after list element type") &&
+                (atri_append((void **)&p->program.array_types, &p->program.array_type_count,
+                    &p->array_types_cap, sizeof(list), &list) || fail(p, "out of memory parsing list type"));
+        }
+    }
     --p->depth;
     span->end = p->current.span.end;
     if (!expect(p, ATRI_TOKEN_IDENTIFIER, message)) { return false; }

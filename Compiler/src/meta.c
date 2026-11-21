@@ -189,8 +189,9 @@ static Generator *generator(Build *b, Unit *u, const char *qualifier, const char
             while (g.id < g.ir.function_count && g.ir.functions[g.id].name.start != fn.start) {
                 ++g.id;
             }
-            if (g.id == g.ir.function_count || g.ir.functions[g.id].return_type != ATRI_IR_PTR_U8) {
-                ok = fail(b, u, site, "#insert generator must return *u8 source text");
+            if (g.id == g.ir.function_count || (g.ir.functions[g.id].return_type != ATRI_IR_PTR_U8 &&
+                g.ir.functions[g.id].return_type != g.ir.string_type)) {
+                ok = fail(b, u, site, "#insert generator must return *u8 or string source text");
             }
         }
     }
@@ -218,7 +219,7 @@ static Generator *generator(Build *b, Unit *u, const char *qualifier, const char
     return &b->generators[b->gen_count - 1];
 }
 
-static bool literal_argument(AtriSource s, AtriToken tok, bool negative, AtriIRType type, AtriVmArgument *out) {
+static bool literal_argument(AtriSource s, AtriToken tok, bool negative, AtriIRType type, AtriIRType string_type, AtriVmArgument *out) {
     size_t pos = tok.span.start + 1;
     if (tok.kind == ATRI_TOKEN_INTEGER && atri_ir_is_integer(type)) {
         uint64_t max = atri_integer_max(type) + (negative && atri_integer_is_signed(type));
@@ -233,7 +234,7 @@ static bool literal_argument(AtriSource s, AtriToken tok, bool negative, AtriIRT
     if (negative) {
         return false;
     }
-    if (tok.kind == ATRI_TOKEN_STRING && type == ATRI_IR_PTR_U8) {
+    if (tok.kind == ATRI_TOKEN_STRING && (type == ATRI_IR_PTR_U8 || type == string_type)) {
         unsigned char *bytes = malloc(tok.span.end - tok.span.start);
         if (!bytes) {
             return false;
@@ -241,7 +242,7 @@ static bool literal_argument(AtriSource s, AtriToken tok, bool negative, AtriIRT
         while (pos < tok.span.end - 1) {
             bytes[out->length++] = atri_literal_byte(s, &pos);
         }
-        bytes[out->length] = 0;
+        if (type == ATRI_IR_PTR_U8) { bytes[out->length] = 0; }
         out->text = bytes;
         return true;
     }
@@ -296,7 +297,7 @@ static bool expand_call(Build *b, Unit *u, AtriSpan marker, size_t limit) {
         return false;
     }
     AtriIRFunction *function = &g->ir.functions[g->id];
-    size_t count = function->parameter_count;
+    size_t count = atri_explicit_parameters(function);
     AtriVmArgument *args = calloc(count + 1, sizeof(*args));
     if (!args) {
         return fail(b, u, fn, "out of memory reading generator arguments");
@@ -315,7 +316,7 @@ static bool expand_call(Build *b, Unit *u, AtriSpan marker, size_t limit) {
         if (negative) {
             tok = atri_lexer_next(&lexer, b->d);
         }
-        if (!literal_argument(u->source, tok, negative, function->parameter_types[i], &args[i])) {
+        if (!literal_argument(u->source, tok, negative, function->parameter_types[i], g->ir.string_type, &args[i])) {
             ok = fail(b, u, tok.span, "generator argument must be a known literal of the parameter type");
         }
     }
@@ -366,13 +367,14 @@ static AtriSpan next_insert(AtriSource s, size_t pos) {
 
 static bool process(Build *b, Unit *u, size_t depth);
 static bool import_unit(Build *b, Unit *u, AtriSpan span, size_t depth) {
-    if (!strcmp(u->source.name, "<stdin>")) {
+    bool standard = atri_standard_import(u->source.text, span);
+    if (!strcmp(u->source.name, "<stdin>") && !standard) {
         return fail(b, u, span, "relative imports require a source file path");
     }
     char *relative = atri_import_path(u->source.name, u->source.text, span);
     char *path = relative ? atri_canonical_path(relative) : NULL;
     if (!path) {
-        fail(b, u, span, "cannot resolve relative .ar module path");
+        fail(b, u, span, standard ? "cannot resolve standard library module" : "cannot resolve relative .ar module path");
         if (relative) {
             snprintf(b->d->detail, sizeof(b->d->detail), "%s", relative);
         }

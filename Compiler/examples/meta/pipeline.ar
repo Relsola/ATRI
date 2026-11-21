@@ -1,4 +1,4 @@
-fn emit(factor: i32) -> *u8 {
+fn emit(factor: i32) -> string {
     if (factor == 2) { return "1 + #run triple(1)"; }
     return "GENERATOR_ONLY_SENTINEL";
 }

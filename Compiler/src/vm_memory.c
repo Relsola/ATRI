@@ -58,6 +58,23 @@ unsigned char *atri_vm_bytes(AtriVmMemory *m, uint64_t ptr, size_t size, bool wr
     return o->bytes + offset;
 }
 
+bool atri_vm_view(AtriVmMemory *m, uint64_t descriptor, const unsigned char **bytes, size_t *length) {
+    uint64_t view[2];
+    const unsigned char *source = atri_vm_bytes(m, descriptor, sizeof(view), false);
+    if (!source) { return false; }
+    memcpy(view, source, sizeof(view));
+    *length = (size_t)view[1];
+    *bytes = atri_vm_bytes(m, view[0], *length, false);
+    return *bytes || (!view[0] && !*length);
+}
+
+uint64_t atri_vm_string_literal(AtriVmMemory *m, const unsigned char *bytes, size_t length, bool view) {
+    uint64_t data = bytes ? atri_vm_object(m, length + !view, VM_LITERAL, bytes) : 0;
+    if (bytes && !data) { return 0; }
+    uint64_t descriptor[] = {data, length};
+    return view ? atri_vm_object(m, sizeof(descriptor), VM_LITERAL, descriptor) : data;
+}
+
 const char *atri_vm_text(AtriVmMemory *m, uint64_t ptr, size_t *length) {
     unsigned char *p = atri_vm_bytes(m, ptr, 0, false);
     if (!p) {
@@ -124,6 +141,7 @@ typedef enum {
     STR_LEN,
     COPY,
     ALLOC,
+    REALLOCATE,
     DEALLOC
 } HostOp;
 typedef struct {
@@ -157,7 +175,7 @@ bool atri_vm_host(AtriVmMemory *m, const AtriIRProgram *p, const AtriIRFunction 
         {"fwrite", "lpllf", WRITE}, {"feof", "if", EOF_TEST},  {"ferror", "if", FILE_ERROR},
         {"fflush", "if", FLUSH},    {"fgetc", "if", GET_CHAR}, {"fputc", "iif", PUT_CHAR},
         {"puts", "is", PUT_STRING}, {"strlen", "ls", STR_LEN}, {"memcpy", "pppl", COPY},
-        {"malloc", "pl", ALLOC},    {"free", "vp", DEALLOC}};
+        {"malloc", "pl", ALLOC},    {"free", "vp", DEALLOC}, {"realloc", "ppl", REALLOCATE}};
     const HostFunction *host = NULL;
     for (size_t i = 0; i < sizeof(functions) / sizeof(*functions); ++i) {
         if (named(p->source, f->name, functions[i].name)) {
@@ -213,6 +231,17 @@ bool atri_vm_host(AtriVmMemory *m, const AtriIRProgram *p, const AtriIRFunction 
     }
     if (host->op == ALLOC) {
         *result = atri_vm_object(m, a[0], VM_HEAP, NULL);
+        return true;
+    }
+    if (host->op == REALLOCATE) {
+        AtriVmObject *old = a[0] ? object(m, a[0]) : NULL;
+        if (a[0] && (!old || !old->bytes || old->kind != VM_HEAP || (uint32_t)a[0])) { goto invalid; }
+        size_t copied = old && old->size < a[1] ? old->size : (size_t)a[1];
+        *result = atri_vm_object(m, a[1], VM_HEAP, NULL);
+        if (*result && a[0]) {
+            memcpy(object(m, *result)->bytes, object(m, a[0])->bytes, copied);
+            atri_vm_drop(m, a[0]);
+        }
         return true;
     }
     if (host->op == DEALLOC) {

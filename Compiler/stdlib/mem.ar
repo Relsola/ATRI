@@ -1,0 +1,25 @@
+export struct ResizeProc;
+export struct Allocator { proc: *ResizeProc; state: *void; }
+export struct Context { allocator: Allocator; }
+
+#extern(C) fn realloc(old: *void, size: u64) -> *void;
+#extern(C) fn free(old: *void) -> void;
+
+export fn c_resize(state: *void, old: *void, old_size: u64, size: u64) -> *void {
+    if (size == 0) { free(old); return null; }
+    return realloc(old, size);
+}
+
+export fn resize_with(allocator: Allocator, old: *void, old_size: u64, size: u64) -> *void {
+    proc: *ResizeProc = allocator.proc;
+    if (proc == null) { return c_resize(allocator.state, old, old_size, size); }
+    return proc(allocator.state, old, old_size, size);
+}
+
+export fn alloc(size: u64) -> *void {
+    return resize_with((*context).allocator, null, 0, size);
+}
+
+export fn dealloc(old: *void, size: u64) -> void {
+    resize_with((*context).allocator, old, size, 0);
+}

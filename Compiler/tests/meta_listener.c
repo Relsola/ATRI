@@ -1,7 +1,7 @@
 #include "meta_plugin.h"
 #include <string.h>
 
-__declspec(dllexport) int32_t atri_on_decl_v1(uint64_t id, uint32_t kind, const char *module,
+__declspec(dllexport) int32_t message(uint64_t id, uint32_t kind, const char *module,
         const char *name, const char *source, const char **replacement, const char **injection) {
     (void)id;
     (void)module;

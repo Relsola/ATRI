@@ -368,10 +368,56 @@ static bool source_type(AtriSource source, const AtriProgram *ast, AtriIRProgram
     }
     AtriSpan name = token.span, qualifier = {0};
     AtriToken next = atri_lexer_next(&lexer, d);
+    if (next.kind == ATRI_TOKEN_LEFT_PAREN && next.span.start < span.end) {
+        if (p->list_storage == ATRI_NONE) {
+            *d = (AtriDiagnostic){.span = span, .message = "list(T) requires std::list"}; return false;
+        }
+        const AtriArrayType *syntax = NULL;
+        for (size_t i = 0; i < ast->array_type_count; ++i) {
+            if (ast->array_types[i].span.start == span.start && ast->array_types[i].length == ATRI_NONE) {
+                syntax = &ast->array_types[i]; break;
+            }
+        }
+        AtriIRType element;
+        if (!syntax || !source_type(source, ast, p, syntax->element, &element, d, depth+1, steps)) { return false; }
+        AtriIRType pointer = atri_ir_pointer_type(element);
+        if (element == ATRI_IR_VOID || pointer == ATRI_IR_INVALID ||
+            (atri_ir_is_struct(element) && p->structs[element-ATRI_IR_STRUCT].opaque)) {
+            *d = (AtriDiagnostic){.span = span, .message = "list element requires a complete object type"}; return false;
+        }
+        size_t index = ast->struct_count;
+        while (index < p->struct_count && (!p->structs[index].list || p->structs[index].element != element)) { ++index; }
+        if (index == p->struct_count) {
+            if (!layout(source, ast, p, p->list_storage, depth+1, d)) { return false; }
+            AtriIRStruct list = p->structs[p->list_storage];
+            if (list.field_count != 4 || p->fields[list.first_field].type != ATRI_IR_PTR_VOID) {
+                *d = (AtriDiagnostic){.span = span, .message = "invalid std::list storage layout"}; return false;
+            }
+            memcpy(p->fields+p->field_count, p->fields+list.first_field, list.field_count*sizeof(*p->fields));
+            list.first_field = p->field_count;
+            list.list = true;
+            list.element = element;
+            p->fields[list.first_field].type = pointer;
+            p->field_count += list.field_count;
+            p->structs[p->struct_count++] = list;
+        }
+        *out = (AtriIRType)(ATRI_IR_STRUCT + index);
+        return true;
+    }
     if (next.kind == ATRI_TOKEN_SCOPE && next.span.start < span.end) {
         qualifier = name; token = atri_lexer_next(&lexer, d); name = token.span;
     }
     AtriIRType type = ATRI_IR_INVALID;
+    if (!qualifier.end && name.end-name.start == 6 && !memcmp(source.text+name.start, "string", 6)) {
+        if (p->string_type == ATRI_IR_INVALID) {
+            p->string_type = (AtriIRType)(ATRI_IR_STRUCT+p->struct_count);
+            p->structs[p->struct_count++] = (AtriIRStruct){.name=name, .first_field=p->field_count,
+                .field_count=2, .size=16, .alignment=8, .state=2};
+            p->fields[p->field_count++] = (AtriIRField){.builtin_name="data", .type=ATRI_IR_PTR_U8};
+            p->fields[p->field_count++] = (AtriIRField){.builtin_name="len", .type=ATRI_IR_U64, .offset=8};
+        }
+        *out = p->string_type; return true;
+    }
     if (!qualifier.end) {
         type = atri_ir_builtin_type(source.text+name.start, name.end-name.start);
     }
@@ -442,10 +488,25 @@ bool atri_layout_structs(AtriSource source, const AtriProgram *ast, AtriIRProgra
     }
     if (ast->struct_count >= ATRI_IR_ARRAY-ATRI_IR_STRUCT) { *d = (AtriDiagnostic){.span = {0}, .message = "struct type table exceeds the prototype limit"}; return false; }
     p->struct_count = ast->struct_count; p->field_count = ast->field_count;
-    p->structs = calloc(p->struct_count ? p->struct_count : 1, sizeof(*p->structs));
-    p->fields = calloc(p->field_count ? p->field_count : 1, sizeof(*p->fields));
+    size_t lists = 0;
+    for (size_t i = 0; i < ast->array_type_count; ++i) { lists += ast->array_types[i].length == ATRI_NONE; }
+    if (lists >= ATRI_IR_ARRAY-ATRI_IR_STRUCT-p->struct_count) {
+        *d = (AtriDiagnostic){.message = "too many list types"}; return false;
+    }
+    p->structs = calloc(p->struct_count + lists + 1, sizeof(*p->structs));
+    p->fields = calloc(p->field_count + 4*lists + 2, sizeof(*p->fields));
     if (!p->structs || !p->fields) { *d = (AtriDiagnostic){.span = {0}, .message = "out of memory"}; return false; }
+    AtriId mem = atri_standard_module(source, ast, "std::mem");
+    AtriId list_module = atri_standard_module(source, ast, "std::list");
+    p->list_storage = ATRI_NONE;
+    p->context_pointer = p->resize_pointer = p->string_type = ATRI_IR_INVALID;
     for (size_t i = 0; i < p->struct_count; ++i) {
+        AtriSpan name = ast->structs[i].name;
+        AtriId module = atri_module_at(ast, name.start);
+        AtriIRType pointer = atri_ir_pointer_type((AtriIRType)(ATRI_IR_STRUCT+i));
+        if (module == mem && name.end-name.start == 7 && !memcmp(source.text+name.start, "Context", 7)) { p->context_pointer = pointer; }
+        if (module == mem && name.end-name.start == 10 && !memcmp(source.text+name.start, "ResizeProc", 10)) { p->resize_pointer = pointer; }
+        if (module == list_module && name.end-name.start == 7 && !memcmp(source.text+name.start, "Storage", 7)) { p->list_storage = i; }
         p->structs[i] = (AtriIRStruct){.name = ast->structs[i].name, .first_field = ast->structs[i].first_field,
             .field_count = ast->structs[i].field_count, .opaque = ast->structs[i].opaque,
             .is_union = ast->structs[i].is_union, .alignment = 1};

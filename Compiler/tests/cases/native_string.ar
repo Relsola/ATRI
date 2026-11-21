@@ -1,0 +1,52 @@
+text :: import "std::string";
+import "std::list";
+
+heading: string := "global\0text";
+blank: string := {};
+struct Catalog { tag: u8; names: [2]string; }
+catalog: Catalog = {.names = {"one", "two\0!"}, .tag = 7};
+
+fn read_text() -> i32 {
+    bytes: [3]u8 = {'a', 0, 'b'};
+    original: string = {.data = &bytes[0], .len = 3};
+    literal: string = "a\0b";
+    utf8: string = "水";
+    if (sizeof(string) != 16 || literal.len != 3 || utf8.len != 3) { return 1; }
+    if (!text::equal(original, literal) || text::find(original, "\0b") != 1) { return 2; }
+    tail: string;
+    if (!text::slice(original, 2, 3, &tail) || tail.data != &bytes[2] || !text::equal(tail, "b")) { return 3; }
+    if (text::slice(original, 0, 4, &tail) || tail.data != &bytes[2]) { return 4; }
+    out: list(u8);
+    defer release(&out);
+    if (!text::concat(tail, original, &out) || !text::equal(text::view(&out), "ba\0b")) { return 5; }
+    old: *u8 = out.data;
+    if (text::to_c(original, &out) || old != out.data) { return 6; }
+    if (!text::concat(text::view(&out), "!", &out) || !text::equal(text::view(&out), "ba\0b!")) { return 7; }
+    if (!text::to_c(tail, &out) || out.len != 2 || *(out.data + 1) != 0) { return 8; }
+    if (!text::equal(text::from_c(out.data), "b")) { return 9; }
+    empty: string;
+    if (!text::to_c(empty, &out) || out.len != 1 || *out.data != 0) { return 10; }
+    plain: [3]u8 = {'a', 'b', 'c'};
+    span: string = {.data = &plain[0], .len = 3};
+    if (!text::to_c(span, &out) || out.len != 4 || *(out.data + 3) != 0) { return 11; }
+    if (!text::equal(text::from_c(out.data), span)) { return 12; }
+    return 0;
+}
+
+fn tail_of(s: string) -> string {
+    result: string;
+    if (!text::slice(s, 1, s.len, &result)) { return {}; }
+    return result;
+}
+
+fn main() -> i32 {
+    if (blank.len != 0 || blank.data != null) { return 24; }
+    if (heading.len != 11 || heading[6] != 0 || !text::equal(heading, "global\0text")) { return 22; }
+    if (catalog.tag != 7 || !text::equal(catalog.names[0], "one") || !text::equal(catalog.names[1], "two\0!")) { return 23; }
+    n: i32 = #insert #run tail_of("x22");
+    kept: string := tail_of("xA\0B");
+    if (n != 22 || kept.len != 3 || kept[1] != 0 || kept[2] != 'B') { return 21; }
+    vm: i32 = #run read_text();
+    if (vm != 0) { return vm + 10; }
+    return read_text();
+}

@@ -45,7 +45,9 @@ static bool indirect(const AtriIRProgram *p, AtriIRType type) {
 static void load(FILE *s, const AtriIRProgram *p, const AtriIRFunction *f, const size_t *slots, AtriId id, const char *reg32, const char *reg64);
 static void object_address(FILE *s, const AtriIRProgram *p, const AtriIRFunction *f, const size_t *slots, AtriId id, const char *reg) {
     const AtriIRInst *v = &f->instructions[id];
-    if (v->kind == ATRI_IR_INDEX) {
+    if (v->kind == ATRI_IR_STRING && v->type == p->string_type) {
+        fprintf(s, "    lea %s, [rip + .Latri_view_%" PRIu64 "]\n", reg, v->immediate);
+    } else if (v->kind == ATRI_IR_INDEX) {
         fprintf(s, "    mov %s, QWORD PTR [rsp + %zu]\n", reg, slots[id]);
     } else if (v->kind == ATRI_IR_FIELD) {
         object_address(s, p, f, slots, v->left, reg);
@@ -70,6 +72,10 @@ static void load(FILE *s, const AtriIRProgram *p, const AtriIRFunction *f, const
     const AtriIRInst *v = &f->instructions[id];
     const char *reg = wide(v->type) ? reg64 : reg32;
     if (v->kind == ATRI_IR_ADDRESS) { object_address(s, p, f, slots, v->left, reg64); }
+    else if (v->kind == ATRI_IR_CONTEXT) {
+        fprintf(s, f->has_context ? "    mov %s, QWORD PTR [rsp + %zu]\n" : "    lea %s, [rsp + %zu]\n", reg64, slots[id]);
+    }
+    else if (v->kind == ATRI_IR_FUNCTION) { fprintf(s, "    lea %s, [rip + atri_fn_%zu]\n", reg64, v->callee); }
     else if (v->kind == ATRI_IR_STRING) { fprintf(s, "    lea %s, [rip + .Latri_string_%" PRIu64 "]\n", reg64, v->immediate); }
     else if (v->kind == ATRI_IR_CONST) {
         fprintf(s, "    mov %s, %" PRId64 "\n", reg, immediate_value(v));
@@ -132,7 +138,7 @@ static bool frame_layout(const AtriIRProgram *p, const AtriIRFunction *f, size_t
     for (size_t i = 0; i < f->instruction_count; ++i) {
         const AtriIRInst *v = &f->instructions[i];
         if (v->kind != ATRI_IR_CALL) { continue; }
-        if (v->argument_count > 256) { *d = (AtriDiagnostic){.span = v->span, .message = "x64 prototype supports at most 256 call arguments"}; return false; }
+        if (v->argument_count > 256u + p->functions[v->callee].has_context) { *d = (AtriDiagnostic){.span = v->span, .message = "x64 prototype supports at most 256 call arguments"}; return false; }
         size_t bytes = call_argument_area(p, v);
         for (size_t a = 0; a < v->argument_count; ++a) {
             AtriIRType type = f->instructions[f->arguments[v->first_argument+a]].type;
@@ -147,6 +153,7 @@ static bool frame_layout(const AtriIRProgram *p, const AtriIRFunction *f, size_t
     for (size_t i = 0; i < f->instruction_count; ++i) {
         const AtriIRInst *v = &f->instructions[i];
         AtriIRKind k = v->kind;
+        if (k == ATRI_IR_CONTEXT || k == ATRI_IR_FUNCTION) { continue; }
         if (k == ATRI_IR_INDEX || (k == ATRI_IR_LOCAL && v->immediate == 0) || (atri_ir_has_value(k) && v->type != ATRI_IR_VOID && k != ATRI_IR_CONST && k != ATRI_IR_ADDRESS && k != ATRI_IR_STRING)) {
             /* 标量对象使用真实布局；窄整数/bool 临时值用 4 字节，address 按需 lea。 */
             size_t width = k == ATRI_IR_INDEX ? 8 : atri_ir_is_aggregate(v->type) ? atri_ir_type_size(p, v->type) : k == ATRI_IR_LOCAL ? atri_ir_type_size(p, v->type) : wide(v->type) ? 8 : 4;
@@ -159,6 +166,12 @@ static bool frame_layout(const AtriIRProgram *p, const AtriIRFunction *f, size_t
     }
     /* call 压入 8 字节返回地址，入口 RSP 为 8 mod 16；非空帧取 8 mod 16，使调用前恢复 16 字节对齐。 */
     *frame = needed == 0 ? 0 : ((needed + 8 + 15) / 16) * 16 - 8;
+    for (size_t i = 0; i < f->instruction_count; ++i) {
+        if (f->instructions[i].kind == ATRI_IR_CONTEXT) {
+            size_t position = f->has_context ? atri_explicit_parameters(f) + (size_t)indirect(p, f->return_type) : 0;
+            slots[i] = *frame + 8 + position*8;
+        }
+    }
     /* 大帧需要栈探测；当前未生成该代码，因此不能仅增大这里的上限。 */
     if (*frame >= 4096) { *d = (AtriDiagnostic){.span = f->name, .message = "x64 prototype requires a stack frame smaller than 4096 bytes"}; return false; }
     return true;
@@ -186,6 +199,17 @@ static void emit_parameters(FILE *s, const AtriIRProgram *p, const AtriIRFunctio
     static const char *const short_registers[] = {"cx", "dx", "r8w", "r9w"};
     bool hidden = indirect(p, f->return_type);
     if (hidden) { fprintf(s, "    mov QWORD PTR [rsp + %zu], rcx\n", slots[f->instruction_count]); }
+    /* 保存入参寄存器到本函数自己的 home space。C 入口在同一区域建立零初始化的根 Context。 */
+    for (size_t i = 0; i < f->instruction_count; ++i) {
+        if (f->instructions[i].kind != ATRI_IR_CONTEXT) { continue; }
+        if (!f->has_context) {
+            fprintf(s, "    mov QWORD PTR [rsp + %zu], 0\n    mov QWORD PTR [rsp + %zu], 0\n", slots[i], slots[i]+8);
+        } else {
+            size_t position = atri_explicit_parameters(f) + (size_t)hidden;
+            if (position < 4) { fprintf(s, "    mov QWORD PTR [rsp + %zu], %s\n", slots[i], wide_registers[position]); }
+        }
+        break;
+    }
     if (f->parameter_count == 0) { return; }
     /* PARAM 取本次调用传入的值。Verifier 限定它只能在入口块，但也允许回边跳到块 0。
      * 在块标签前一次性保存全部参数，避免函数体的调用、除法或移位改写实参寄存器后重读。 */
@@ -277,7 +301,16 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
                 fprintf(s, ".balign %zu\n.Latri_global_%zu:\n", atri_ir_type_align(p, g->type), i);
                 /* 零大小对象保留一个地址锚点，不改变语言可见的 sizeof。 */
                 if (!g->data_size) { fputs("    .byte 0\n", s); }
-                else { emit_bytes(s, g->data, g->data_size); }
+                else {
+                    size_t offset = 0;
+                    for (size_t j = 0; j < g->string_count; ++j) {
+                        AtriStringRelocation ref = g->strings[j];
+                        emit_bytes(s, g->data+offset, ref.offset-offset);
+                        fprintf(s, "    .quad .Latri_string_%zu\n", ref.literal);
+                        offset = ref.offset+8;
+                    }
+                    emit_bytes(s, g->data+offset, g->data_size-offset);
+                }
                 continue;
             }
             unsigned width = (unsigned)atri_ir_type_size(p, g->type);
@@ -291,7 +324,10 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
         for (size_t n = 0; n < p->string_count; ++n) {
             if (live->strings && !live->strings[n]) { continue; }
             fprintf(s, ".Latri_string_%zu:\n", n);
-            emit_bytes(s, p->strings[n].bytes, p->strings[n].length+1);
+            emit_bytes(s, p->strings[n].bytes, p->strings[n].length + !p->strings[n].view);
+            if (p->strings[n].view) {
+                fprintf(s, ".balign 8\n.Latri_view_%zu:\n    .quad .Latri_string_%zu, %zu\n", n, n, p->strings[n].length);
+            }
         }
         fputs(".text\n", s);
     }
@@ -317,7 +353,7 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
         for (size_t i = 0; i < f->instruction_count; ++i) {
             const AtriIRInst *v = &f->instructions[i];
             switch (v->kind) {
-                case ATRI_IR_NOP: case ATRI_IR_CONST: case ATRI_IR_FIELD: case ATRI_IR_LOCAL: case ATRI_IR_ADDRESS: case ATRI_IR_STRING: case ATRI_IR_PARAM: continue;
+                case ATRI_IR_CONTEXT: case ATRI_IR_FUNCTION: case ATRI_IR_NOP: case ATRI_IR_CONST: case ATRI_IR_FIELD: case ATRI_IR_LOCAL: case ATRI_IR_ADDRESS: case ATRI_IR_STRING: case ATRI_IR_PARAM: continue;
                 case ATRI_IR_LABEL: fprintf(s, ".Latri_%zu_%" PRIu64 ":\n", n, v->immediate); continue;
                 case ATRI_IR_JUMP: case ATRI_IR_BRANCH: {
                     AtriId next = fallthrough_block(f, i);
@@ -433,7 +469,7 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
                 case ATRI_IR_CALL: {
                     size_t hidden = (size_t)indirect(p, v->type);
                     size_t copy_end = call_argument_area(p, v);
-                    size_t argument_copies[256];
+                    size_t argument_copies[257];
                     for (size_t a = 0; a < v->argument_count; ++a) {
                         AtriId argument = f->arguments[v->first_argument+a];
                         AtriIRType type = f->instructions[argument].type;
@@ -460,7 +496,12 @@ static bool emit_reachable_x64(FILE *s, AtriSource source, const AtriIRProgram *
                         }
                     }
                     if (hidden) { fprintf(s, "    lea rcx, [rsp + %zu]\n", slots[i]); }
-                    fputs("    call ", s); symbol(s, source, p, v->callee); fputc('\n', s);
+                    if (v->procedure) {
+                        load(s, p, f, slots, v->procedure-1, "r11d", "r11");
+                        fputs("    call r11\n", s);
+                    } else {
+                        fputs("    call ", s); symbol(s, source, p, v->callee); fputc('\n', s);
+                    }
                     if (v->type == ATRI_IR_VOID) { continue; }
                     if (atri_ir_is_aggregate(v->type)) {
                         size_t size = atri_ir_type_size(p, v->type);

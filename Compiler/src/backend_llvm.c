@@ -42,11 +42,16 @@ static void symbol(Writer *w, size_t id) {
 static Operand ref(const AtriIRFunction *f, size_t id) {
     Operand o;
     const AtriIRInst *v = &f->instructions[id];
-    if (v->kind == ATRI_IR_CONST) {
+    if (v->kind == ATRI_IR_FUNCTION) {
+        snprintf(o.text, sizeof(o.text), "@atri_fn_%zu", v->callee);
+    } else if (v->kind == ATRI_IR_CONTEXT) {
+        if (!f->has_context) { return (Operand){"%root_context"}; }
+        snprintf(o.text, sizeof(o.text), "%%a%zu", atri_explicit_parameters(f));
+    } else if (v->kind == ATRI_IR_CONST) {
         if (atri_ir_is_pointer(v->type)) { return (Operand){"null"}; }
         snprintf(o.text, sizeof(o.text), "%" PRIu64, v->immediate);
     } else if (v->kind == ATRI_IR_STRING) {
-        snprintf(o.text, sizeof(o.text), "@.str.%" PRIu64, v->immediate);
+        snprintf(o.text, sizeof(o.text), "@.%s.%" PRIu64, v->type == ATRI_IR_PTR_U8 ? "str" : "view", v->immediate);
     } else if (v->kind == ATRI_IR_LOCAL && v->immediate) {
         snprintf(o.text, sizeof(o.text), "@.g.%" PRIu64, v->immediate-1);
     } else if (v->kind == ATRI_IR_PARAM && !atri_ir_is_aggregate(v->type)) {
@@ -115,7 +120,8 @@ static void emit_call(Writer *w, size_t id) {
         }
         fputs("...) ", w->s);
     }
-    symbol(w, v->callee);
+    if (v->procedure) { fputs(ref(f, v->procedure-1).text, w->s); }
+    else { symbol(w, v->callee); }
     fputc('(', w->s);
     if (hidden) { fprintf(w->s, "ptr sret([%zu x i8]) %%v%zu", atri_ir_type_size(w->p, v->type), id); }
     for (size_t a = 0; a < v->argument_count; ++a) {
@@ -139,7 +145,7 @@ static bool instruction(Writer *w, size_t i) {
     size_t size = v->type == ATRI_IR_VOID ? 0 : atri_ir_type_size(w->p, v->type);
     Operand dest = ref(f, i);
     switch (v->kind) {
-        case ATRI_IR_NOP: case ATRI_IR_LOCAL: case ATRI_IR_STRING: case ATRI_IR_CONST: case ATRI_IR_PARAM:
+        case ATRI_IR_CONTEXT: case ATRI_IR_FUNCTION: case ATRI_IR_NOP: case ATRI_IR_LOCAL: case ATRI_IR_STRING: case ATRI_IR_CONST: case ATRI_IR_PARAM:
             break;
         case ATRI_IR_LABEL: fprintf(w->s, "b%" PRIu64 ":\n", v->immediate); break;
         case ATRI_IR_JUMP: fprintf(w->s, "  br label %%b%zu\n", v->target); break;
@@ -232,10 +238,15 @@ static bool instruction(Writer *w, size_t i) {
 }
 static void slots(Writer *w) {
     const AtriIRFunction *f = w->f;
+    bool root = false;
     for (size_t i = 0; i < f->instruction_count; ++i) {
         const AtriIRInst *v = &f->instructions[i];
+        if (!root && !f->has_context && v->kind == ATRI_IR_CONTEXT) {
+            fputs("  %root_context = alloca [2 x ptr], align 8\n  store [2 x ptr] zeroinitializer, ptr %root_context, align 8\n", w->s);
+            root = true;
+        }
         bool local = v->kind == ATRI_IR_LOCAL && !v->immediate;
-        bool snapshot = atri_ir_is_aggregate(v->type) && atri_ir_has_value(v->kind);
+        bool snapshot = atri_ir_is_aggregate(v->type) && atri_ir_has_value(v->kind) && v->kind != ATRI_IR_STRING;
         if (local || snapshot) {
             size_t n = atri_ir_type_size(w->p, v->type);
             fprintf(w->s, "  %%v%zu = alloca [%zu x i8], align %zu\n", i, n ? n : 1, atri_ir_type_align(w->p, v->type));
@@ -261,10 +272,34 @@ static void slots(Writer *w) {
     }
 }
 static void bytes(FILE *s, const unsigned char *data, size_t size) {
-    if (!size) { fputs("[1 x i8] zeroinitializer", s); return; }
+    if (!size) { fputs("[0 x i8] zeroinitializer", s); return; }
     fprintf(s, "[%zu x i8] c\"", size);
     for (size_t i = 0; i < size; ++i) { fprintf(s, "\\%02X", (unsigned)data[i]); }
     fputc('"', s);
+}
+static void global_bytes(FILE *s, const AtriIRGlobal *g) {
+    if (!g->data_size) { fputs("[1 x i8] zeroinitializer", s); return; }
+    if (!g->string_count) { bytes(s, g->data, g->data_size); return; }
+    /* LLVM 的指针重定位必须是类型化常量，其他部分保持原有目标字节。 */
+    for (size_t pass = 0; pass < 2; ++pass) {
+        size_t offset = 0;
+        fputs(pass ? " <{" : "<{", s);
+        for (size_t i = 0; i <= g->string_count; ++i) {
+            size_t end = i == g->string_count ? g->data_size : g->strings[i].offset;
+            if (offset != end) {
+                if (offset) { fputs(", ", s); }
+                if (pass) { bytes(s, g->data+offset, end-offset); }
+                else { fprintf(s, "[%zu x i8]", end-offset); }
+            }
+            if (i < g->string_count) {
+                if (end) { fputs(", ", s); }
+                fputs("ptr", s);
+                if (pass) { fprintf(s, " @.str.%zu", g->strings[i].literal); }
+                offset = end+8;
+            }
+        }
+        fputs("}>", s);
+    }
 }
 static bool emit_module(FILE *s, AtriSource source, const AtriIRProgram *p, const AtriLiveSymbols *live, AtriDiagnostic *d) {
     Writer w = {.s=s, .source=source, .p=p};
@@ -286,7 +321,7 @@ static bool emit_module(FILE *s, AtriSource source, const AtriIRProgram *p, cons
         const AtriIRGlobal *g = &p->globals[i];
         if (g->constant || (live->globals && !live->globals[i])) { continue; }
         fprintf(s, "@.g.%zu = internal global ", i);
-        if (atri_ir_is_aggregate(g->type)) { bytes(s,g->data,g->data_size); }
+        if (atri_ir_is_aggregate(g->type)) { global_bytes(s,g); }
         else if (atri_ir_is_pointer(g->type)) { fputs("ptr null", s); }
         else { fprintf(s, "%s %" PRIu64, abi_type(p,g->type),g->bits); }
         fprintf(s, ", align %zu\n", atri_ir_type_align(p,g->type));
@@ -294,8 +329,11 @@ static bool emit_module(FILE *s, AtriSource source, const AtriIRProgram *p, cons
     for (size_t i = 0; i < p->string_count; ++i) {
         if (live->strings && !live->strings[i]) { continue; }
         fprintf(s, "@.str.%zu = private constant ", i);
-        bytes(s,p->strings[i].bytes,p->strings[i].length+1);
+        bytes(s,p->strings[i].bytes,p->strings[i].length + !p->strings[i].view);
         fputc('\n', s);
+        if (p->strings[i].view) {
+            fprintf(s, "@.view.%zu = private constant {ptr, i64} {ptr @.str.%zu, i64 %zu}, align 8\n", i, i, p->strings[i].length);
+        }
     }
     for (size_t i = 0; i < p->function_count; ++i) {
         if (live->functions && !live->functions[i]) { continue; }

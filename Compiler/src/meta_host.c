@@ -32,7 +32,7 @@ static bool workspace(AtriMetaPlugin *p) {
     return false;
 }
 static bool callback_symbol(AtriSource source, const AtriIRProgram *ir, AtriId *function) {
-    const char *name = "atri_on_decl_v1";
+    const char *name = "message";
     AtriIRType output = atri_ir_pointer_type(ATRI_IR_PTR_U8);
     AtriIRType signature[] = {ATRI_IR_U64, ATRI_IR_U32, ATRI_IR_PTR_U8, ATRI_IR_PTR_U8, ATRI_IR_PTR_U8, output, output};
     *function = ATRI_NONE;
@@ -92,12 +92,13 @@ static bool build_listener(AtriMetaPlugin *p, const char *path) {
     AtriIRProgram ir = {0};
     AtriDiagnostic d = {0};
     AtriSource source = {path, input, length};
-    bool ok = atri_load_program(source, &source, &ast, &d) && bind_keyword(&source, input, &ast, &d) &&
-              atri_lower(source, &ast, &ir, &d);
+    bool ok = atri_load_program(source, &source, &ast, &d) && bind_keyword(&source, input, &ast, &d);
+    ast.plugin = true;
+    if (ok) { ok = atri_lower(source, &ast, &ir, &d); }
     AtriId symbol;
     bool uses_host_api = false;
     if (ok && !callback_symbol(source, &ir, &symbol)) {
-        fprintf(stderr, "%s: expected atri_on_decl_v1(u64,u32,*u8,*u8,*u8,**u8,**u8)->i32 in a module without main\n", path);
+        fprintf(stderr, "%s: expected message(u64,u32,*u8,*u8,*u8,**u8,**u8)->i32 in a module without main\n", path);
         ok = false;
     }
     if (ok && !workspace(p)) {
@@ -108,7 +109,7 @@ static bool build_listener(AtriMetaPlugin *p, const char *path) {
         FILE *assembly = fopen(p->assembly, "wb");
         ok = assembly && atri_emit_x64(assembly, source, &ir, &d);
         if (ok) {
-            ok = fprintf(assembly, "\n.section .drectve,\"yn\"\n.ascii \" /EXPORT:atri_on_decl_v1=atri_fn_%zu\"\n", symbol) >= 0;
+            ok = fprintf(assembly, "\n.section .drectve,\"yn\"\n.ascii \" /EXPORT:message=atri_fn_%zu\"\n", symbol) >= 0;
         }
         for (size_t i=0; ok && i<ir.function_count; ++i) {
             const AtriIRFunction *fn=&ir.functions[i];
@@ -116,12 +117,12 @@ static bool build_listener(AtriMetaPlugin *p, const char *path) {
             const char *name = source.text + fn->name.start;
             if (fn->external_c && ((length >= 9 && !memcmp(name, "atri_ast_", 9)) ||
                 (length >= 14 && !memcmp(name, "atri_register_", 14)))) { uses_host_api = true; }
-            const char reg[]="atri_register_v1";
+            const char reg[]="register";
             if (!fn->module && !fn->external_c && fn->name.end-fn->name.start==sizeof(reg)-1 &&
                 !memcmp(source.text+fn->name.start,reg,sizeof(reg)-1)) {
                 ok=fn->return_type==ATRI_IR_I32 && !fn->parameter_count;
-                if (ok) { ok=fprintf(assembly,".ascii \" /EXPORT:atri_register_v1=atri_fn_%zu\"\n",i)>=0; }
-                else { fprintf(stderr,"%s: expected atri_register_v1()->i32\n",path); }
+                if (ok) { ok=fprintf(assembly,".ascii \" /EXPORT:register=atri_fn_%zu\"\n",i)>=0; }
+                else { fprintf(stderr,"%s: expected register()->i32\n",path); }
             }
         }
         if (assembly && fclose(assembly)) { ok = false; }
@@ -174,14 +175,14 @@ AtriMetaPlugin *atri_meta_open(const char *input) {
     }
     if (ok) {
         p->library = LoadLibraryExA(*p->dll ? p->dll : path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
-        FARPROC entry = p->library ? GetProcAddress(p->library, "atri_on_decl_v1") : NULL;
+        FARPROC entry = p->library ? GetProcAddress(p->library, "message") : NULL;
         if (!entry) {
             fprintf(stderr, "%s: %s failed (Windows error %lu)\n", input,
                     p->library ? "GetProcAddress" : "LoadLibraryEx", GetLastError());
         }
         if (entry) { memcpy(&p->callback, &entry, sizeof(entry)); }
         ok = entry != NULL;
-        FARPROC reg = p->library ? GetProcAddress(p->library,"atri_register_v1") : NULL;
+        FARPROC reg = p->library ? GetProcAddress(p->library,"register") : NULL;
         if (ok && reg) {
             AtriMetaRegister *register_syntax;
             memcpy(&register_syntax,&reg,sizeof(reg));
@@ -192,7 +193,7 @@ AtriMetaPlugin *atri_meta_open(const char *input) {
     }
     free(path);
     if (!ok) {
-        fprintf(stderr, "%s: cannot prepare declaration listener (expected .ar or a DLL exporting atri_on_decl_v1)\n", input);
+        fprintf(stderr, "%s: cannot prepare declaration listener (expected .ar or a DLL exporting message)\n", input);
         atri_meta_close(p);
         return NULL;
     }

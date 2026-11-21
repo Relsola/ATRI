@@ -50,6 +50,9 @@ static bool same(Lower *l, AtriSpan a, AtriSpan b) {
     return a.end - a.start == b.end - b.start &&
            memcmp(l->source.text + a.start, l->source.text + b.start, a.end - a.start) == 0;
 }
+static bool named(Lower *l, AtriSpan name, const char *text) {
+    return name.end-name.start == strlen(text) && !memcmp(l->source.text+name.start, text, strlen(text));
+}
 static bool type(Lower *l, AtriSpan span, AtriIRType *out) {
     return atri_type_from_source(l->source, l->ast, l->ir, span, out, l->diagnostic);
 }
@@ -60,6 +63,9 @@ static size_t lookup(Lower *l, AtriSpan name) {
     return ATRI_NONE;
 }
 static bool bind(Lower *l, Binding b) {
+    if (named(l, b.name, "context") && b.type != l->ir->context_pointer) {
+        return error(l, b.name, "context binding requires a pointer to std::mem Context");
+    }
     size_t previous = lookup(l, b.name);
     if (previous != ATRI_NONE && l->bindings[previous].scope == l->scope) return error(l, b.name, "duplicate local or parameter name");
     b.scope = l->scope;
@@ -73,6 +79,21 @@ static bool bind(Lower *l, Binding b) {
 static bool emit(Lower *l, AtriIRInst inst, AtriId *id) {
     return atri_ir_append(l->function, inst, id) || error(l, inst.span, "out of memory while lowering IR");
 }
+/* context 的局部绑定沿用名称的词法作用域和 defer 的捕获规则。独立的编译期求值有自己的入口上下文。 */
+static bool current_context(Lower *l, AtriSpan span, AtriIRType type, AtriId *out) {
+    if (!l->constant_context) {
+        for (AtriId i = l->visible_binding; i != ATRI_NONE; i = l->bindings[i].previous) {
+            Binding *b = &l->bindings[i];
+            if (b->unavailable || !named(l, b->name, "context")) { continue; }
+            AtriId value = b->value;
+            if (b->address != ATRI_NONE && !emit(l, (AtriIRInst){.kind=ATRI_IR_LOAD, .type=b->type,
+                .left=b->address, .span=span}, &value)) { return false; }
+            if (type == b->type) { *out = value; return true; }
+            return emit(l, (AtriIRInst){.kind=ATRI_IR_CAST, .type=type, .left=value, .span=span}, out);
+        }
+    }
+    return emit(l, (AtriIRInst){.kind=ATRI_IR_CONTEXT, .type=type, .span=span}, out);
+}
 static bool literal(Lower *l, AtriSpan text, AtriIRType type, uint64_t limit, uint64_t *out) {
     if (atri_integer_literal(l->source, text, limit, out)) { return true; }
     const char *message = type == ATRI_IR_I8 ? "integer literal is outside the i8 range" :
@@ -84,17 +105,17 @@ static bool literal(Lower *l, AtriSpan text, AtriIRType type, uint64_t limit, ui
         type == ATRI_IR_I32 ? "integer literal is outside the i32 range" : "integer literal is outside the i64 range";
     return error(l, text, message);
 }
-static bool string_literal(Lower *l, const AtriExpr *e, AtriId *out) {
-    AtriIRString string = {.bytes = malloc(e->text.end-e->text.start)};
+static bool literal_data(Lower *l, const AtriExpr *e, bool view, size_t *index) {
+    AtriIRString string = {.bytes = malloc(e->text.end-e->text.start), .view = view};
     if (!string.bytes) { return error(l, e->span, "out of memory while decoding string literal"); }
     size_t cursor = e->text.start+1, end = e->text.end-1;
     while (cursor < end) { string.bytes[string.length++] = atri_literal_byte(l->source, &cursor); }
-    string.bytes[string.length] = 0;
-    size_t index = l->ir->string_count;
+    if (!view) { string.bytes[string.length] = 0; }
+    *index = l->ir->string_count;
     if (!atri_append((void **)&l->ir->strings, &l->ir->string_count, &l->ir->string_capacity, sizeof(string), &string)) {
         free(string.bytes); return error(l, e->span, "out of memory while storing string literal");
     }
-    return emit(l, (AtriIRInst){.kind = ATRI_IR_STRING, .type = ATRI_IR_PTR_U8, .span = e->span, .immediate = index}, out);
+    return true;
 }
 /* 按名称保守预扫取地址；同名遮蔽可能多分配存储，但不能漏掉真正需要稳定地址的变量。 */
 static bool address_taken(Lower *l, AtriSpan name) {
@@ -123,11 +144,15 @@ static bool store(Lower *l, AtriId pointer, AtriId value, AtriSpan span);
 static bool nonnull(Lower *l, AtriId pointer, AtriSpan span);
 static AtriIRType infer_type(Lower *l, AtriId id, AtriIRType hint);
 static bool c_value_compatible(const AtriIRProgram *p, AtriIRType type);
+static bool field_named(Lower *l, size_t id, AtriSpan name) {
+    const AtriIRField *field = &l->ir->fields[id];
+    return field->builtin_name ? named(l, name, field->builtin_name) : same(l, name, field->name);
+}
 static AtriId field_index(Lower *l, AtriIRType type, AtriSpan name) {
     if (!atri_ir_is_struct(type)) { return ATRI_NONE; }
     const AtriIRStruct *t = &l->ir->structs[type-ATRI_IR_STRUCT];
     for (size_t i = 0; i < t->field_count; ++i) {
-        if (same(l, name, l->ir->fields[t->first_field+i].name)) { return t->first_field+i; }
+        if (field_named(l, t->first_field+i, name)) { return t->first_field+i; }
     }
     return ATRI_NONE;
 }
@@ -147,6 +172,10 @@ static bool location(Lower *l, AtriId id, bool write, AtriIRType *type, AtriId *
             return error(l, e->span, "expression has no addressable storage");
         }
         AtriId global = resolve_declaration(l, e, true);
+        if (global != ATRI_NONE && l->ir->globals[global].constant && !write && l->ir->globals[global].type == l->ir->string_type) {
+            *type = l->ir->string_type;
+            return expression(l, id, *type, out);
+        }
         if (global != ATRI_NONE && !l->ir->globals[global].constant) {
             if (l->constant_context) { return error(l, e->span, "compile-time initializer cannot read a runtime global"); }
             *type = l->ir->globals[global].type; return global_location(l, global, e->span, out);
@@ -155,6 +184,22 @@ static bool location(Lower *l, AtriId id, bool write, AtriIRType *type, AtriId *
     }
     if (e->kind == ATRI_EXPR_INDEX) {
         AtriIRType base_type = infer_type(l, e->left, ATRI_IR_INVALID);
+        if (base_type != ATRI_IR_INVALID && base_type == l->ir->string_type) {
+            if (write) { return error(l, e->span, "string bytes are read-only"); }
+            AtriIRType index_type = infer_type(l, e->right, ATRI_IR_I64);
+            if (!atri_ir_is_integer(index_type)) { return error(l, e->span, "string index requires an integer"); }
+            AtriId base, field, data, index;
+            size_t first = l->ir->structs[base_type-ATRI_IR_STRUCT].first_field;
+            if (!expression(l, e->left, base_type, &base) ||
+                !emit(l, (AtriIRInst){.kind=ATRI_IR_FIELD, .type=ATRI_IR_PTR_U8, .left=base, .immediate=first, .span=e->span}, &field) ||
+                !emit(l, (AtriIRInst){.kind=ATRI_IR_LOAD, .type=ATRI_IR_PTR_U8, .left=field, .span=e->span}, &data) ||
+                !expression(l, e->right, index_type, &index)) { return false; }
+            if (index_type != ATRI_IR_I64 && !emit(l, (AtriIRInst){.kind=ATRI_IR_CAST, .type=ATRI_IR_I64,
+                .left=index, .span=e->span}, &index)) { return false; }
+            *type = ATRI_IR_U8;
+            return emit(l, (AtriIRInst){.kind=ATRI_IR_PTR_OFFSET, .type=ATRI_IR_PTR_U8, .op=ATRI_ADD,
+                .left=data, .right=index, .span=e->span}, out);
+        }
         if (!atri_ir_is_array(base_type)) { return error(l, e->span, "indexing requires a fixed array object"); }
         AtriId base, index;
         const AtriExpr *parent = &l->ast->expressions[e->left];
@@ -246,6 +291,9 @@ static bool initialize_aggregate(Lower *l, const AtriExpr *e, AtriIRType type, A
         return emit(l, (AtriIRInst){.kind = ATRI_IR_LOAD, .type = type, .left = object, .span = e->span}, out);
     }
     if (!atri_ir_is_struct(type)) { return error(l, e->span, "aggregate initializer requires an expected struct, union or array type"); }
+    if (type == l->ir->string_type && !e->argument_count) {
+        return emit(l, (AtriIRInst){.kind = ATRI_IR_ZERO, .type = type, .span = e->span}, out);
+    }
     if (l->constant_context) { return error(l, e->span, "compile-time struct/union values are not supported yet"); }
     const AtriIRStruct *t = &l->ir->structs[type-ATRI_IR_STRUCT];
     AtriId object, zero;
@@ -256,7 +304,7 @@ static bool initialize_aggregate(Lower *l, const AtriExpr *e, AtriIRType type, A
     for (size_t i = 0; !t->is_union && i < t->field_count; ++i) {
         size_t field = t->first_field+i; bool supplied = false;
         for (size_t j = 0; j < e->argument_count; ++j) {
-            if (same(l, l->ir->fields[field].name, l->ast->initializers[e->first_argument+j].name)) { supplied = true; break; }
+            if (field_named(l, field, l->ast->initializers[e->first_argument+j].name)) { supplied = true; break; }
         }
         if (supplied) { continue; }
         AtriIRType ft = l->ir->fields[field].type;
@@ -264,7 +312,7 @@ static bool initialize_aggregate(Lower *l, const AtriExpr *e, AtriIRType type, A
         if (atri_ir_is_aggregate(ft)) {
             AtriExpr empty = {.kind = ATRI_EXPR_INITIALIZER, .span = e->span};
             if (!initialize_aggregate(l, &empty, ft, &value)) { return false; }
-        } else if (l->ast->fields[field].expression != ATRI_NONE) {
+        } else if (field < l->ast->field_count && l->ast->fields[field].expression != ATRI_NONE) {
             if (!emit(l, (AtriIRInst){.kind = ATRI_IR_CALL, .type = ft, .callee = l->ast->function_count+l->ast->global_count+field, .span = e->span}, &value)) { return false; }
         } else { continue; }
         if (!emit(l, (AtriIRInst){.kind = ATRI_IR_FIELD, .type = ft, .left = object, .immediate = field, .span = e->span}, &destination) || !store(l, destination, value, e->span)) { return false; }
@@ -287,6 +335,17 @@ static bool static_initializer(Lower *l, AtriId global, AtriIRType type, AtriId 
     --l->static_steps;
     const AtriExpr *e = id == ATRI_NONE ? NULL : &l->ast->expressions[id];
     if (e) { span = e->span; }
+    if (type == l->ir->string_type && e && e->kind == ATRI_EXPR_STRING) {
+        AtriStringRelocation ref = {.offset = offset};
+        AtriIRGlobal *g = &l->ir->globals[global];
+        if (!literal_data(l, e, true, &ref.literal)) { return false; }
+        if (!atri_append((void **)&g->strings, &g->string_count, &g->string_capacity, sizeof(ref), &ref)) {
+            return error(l, span, "out of memory recording a string initializer");
+        }
+        uint64_t length = l->ir->strings[ref.literal].length;
+        for (size_t b = 0; b < 8; ++b) { g->data[offset+8+b] = (unsigned char)(length >> (8*b)); }
+        return true;
+    }
     if (atri_ir_is_aggregate(type)) {
         if (e && e->kind != ATRI_EXPR_INITIALIZER) {
             return error(l, span, "static aggregate initialization requires a brace initializer; aggregate calls and copies are not supported yet");
@@ -314,7 +373,7 @@ static bool static_initializer(Lower *l, AtriId global, AtriIRType type, AtriId 
             size_t field = structure->first_field+i;
             bool supplied = false;
             for (size_t j = 0; e && j < e->argument_count; ++j) {
-                if (same(l, l->ir->fields[field].name, l->ast->initializers[e->first_argument+j].name)) { supplied = true; break; }
+                if (field_named(l, field, l->ast->initializers[e->first_argument+j].name)) { supplied = true; break; }
             }
             if (!supplied && !static_initializer(l, global, l->ir->fields[field].type, ATRI_NONE, field,
                 offset+l->ir->fields[field].offset, depth+1, span)) { return false; }
@@ -327,7 +386,7 @@ static bool static_initializer(Lower *l, AtriId global, AtriIRType type, AtriId 
         }
         return true;
     }
-    if (!e && (default_field == ATRI_NONE || l->ast->fields[default_field].expression == ATRI_NONE)) { return true; }
+    if (!e && (default_field >= l->ast->field_count || l->ast->fields[default_field].expression == ATRI_NONE)) { return true; }
     /* 当前指针字段的默认值/静态初值只允许 null；字段声明自身仍由下方统一流程检查。 */
     if (!e && atri_ir_is_pointer(type)) { return true; }
     size_t first = l->function->instruction_count;
@@ -426,7 +485,7 @@ static bool require_value(Lower *l, AtriId value, size_t first, AtriSpan span, b
     AtriIRType type = l->function->instructions[value].type;
     /* 无结果调用仍需执行求值义务，内部占位只用于删除求值区间。 */
     if (discard) { type = ATRI_IR_I32; }
-    if (!atri_ir_is_integer(type) && type != ATRI_IR_BOOL && type != ATRI_IR_PTR_U8) { return error(l, span, "compile-time evaluation requires a materializable integer, bool or byte string or a discarded void call"); }
+    if (!atri_ir_is_integer(type) && type != ATRI_IR_BOOL && type != ATRI_IR_PTR_U8 && type != l->ir->string_type) { return error(l, span, "compile-time evaluation requires a materializable integer, bool or string or a discarded void call"); }
     if (!emit(l, (AtriIRInst){.kind = ATRI_IR_CONST, .type = type, .span = span}, &result)) { return false; }
     AtriIRConstant obligation = {.span = span, .expression = value, .result = result, .first_instruction = first, .discard = discard};
     if (!add_lexical_constant(l, obligation)) { return false; }
@@ -475,12 +534,13 @@ static AtriIRType infer_type(Lower *l, AtriId id, AtriIRType hint) {
         }
         case ATRI_EXPR_INDEX: {
             AtriIRType array = infer_type(l, e->left, ATRI_IR_INVALID);
+            if (array != ATRI_IR_INVALID && array == l->ir->string_type) { return ATRI_IR_U8; }
             return atri_ir_is_array(array) ? l->ir->arrays[array-ATRI_IR_ARRAY].element : ATRI_IR_INVALID;
         }
         case ATRI_EXPR_BOOL: return ATRI_IR_BOOL;
         case ATRI_EXPR_CHARACTER: return ATRI_IR_U8;
         case ATRI_EXPR_INTEGER: return atri_ir_is_integer(hint) ? hint : ATRI_IR_INVALID;
-        case ATRI_EXPR_STRING: return ATRI_IR_PTR_U8;
+        case ATRI_EXPR_STRING: return hint != ATRI_IR_INVALID && hint == l->ir->string_type ? hint : ATRI_IR_PTR_U8;
         case ATRI_EXPR_NULL: return atri_ir_is_pointer(hint) ? hint : ATRI_IR_INVALID;
         case ATRI_EXPR_ADDRESS: return atri_ir_pointer_type(infer_type(l, e->left, ATRI_IR_INVALID));
         case ATRI_EXPR_DEREFERENCE: return atri_ir_pointee(infer_type(l, e->left, ATRI_IR_INVALID));
@@ -491,12 +551,15 @@ static AtriIRType infer_type(Lower *l, AtriId id, AtriIRType hint) {
         }
         case ATRI_EXPR_NAME: {
             AtriIRType member_type; uint64_t bits;
+            if (!e->qualifier.end && named(l, e->text, "context")) { return l->ir->context_pointer; }
             if (atri_enum_member(l->source, l->ast, l->ir, e, &member_type, &bits)) { return member_type; }
             size_t b = e->qualifier.end ? ATRI_NONE : lookup(l, e->text);
             AtriId global = resolve_declaration(l, e, true);
             return b != ATRI_NONE ? l->bindings[b].type : global != ATRI_NONE ? l->ir->globals[global].type : ATRI_IR_INVALID;
         }
         case ATRI_EXPR_CALL: {
+            size_t local = e->qualifier.end ? ATRI_NONE : lookup(l, e->text);
+            if (local != ATRI_NONE && l->bindings[local].type == l->ir->resize_pointer) { return ATRI_IR_PTR_VOID; }
             AtriId callee = resolve_declaration(l, e, false);
             return callee == ATRI_NONE ? ATRI_IR_INVALID : l->ir->functions[callee].return_type;
         }
@@ -535,6 +598,16 @@ static bool nonnull(Lower *l, AtriId pointer, AtriSpan span) {
 }
 static bool address(Lower *l, AtriId id, AtriId *out) {
     const AtriExpr *e = &l->ast->expressions[id];
+    if (e->kind == ATRI_EXPR_NAME && (e->qualifier.end || lookup(l, e->text) == ATRI_NONE)) {
+        AtriId callee = resolve_declaration(l, e, false);
+        if (callee != ATRI_NONE && l->ir->resize_pointer != ATRI_IR_INVALID) {
+            const AtriIRFunction *f = &l->ir->functions[callee];
+            if (!atri_ir_allocator_callback(f)) {
+                return error(l, e->span, "allocator callback requires fn(*void, *void, u64, u64) -> *void");
+            }
+            return emit(l, (AtriIRInst){.kind=ATRI_IR_FUNCTION, .callee=callee, .type=l->ir->resize_pointer, .span=e->span}, out);
+        }
+    }
     if (l->constant_context) { return error(l, e->span, "compile-time pointer operations are not supported yet"); }
     if (e->kind == ATRI_EXPR_DEREFERENCE) { return expression(l, e->left, ATRI_IR_INVALID, out); }
     if (e->kind == ATRI_EXPR_NAME && !e->qualifier.end) {
@@ -595,6 +668,61 @@ static bool binary_values(Lower *l, AtriOp op, AtriId left, AtriId right, AtriSp
     if (op != ATRI_SHL && op != ATRI_SHR && a != b) { return error(l, span, "type mismatch: integer operands must have the same type"); }
     inst.kind = ATRI_IR_BINARY; return emit(l, inst, out);
 }
+static bool list_arguments(Lower *l, const AtriExpr *call, const AtriIRFunction *callee, AtriId *args) {
+    AtriId list = l->ast->arguments[call->first_argument];
+    AtriIRType pointer = infer_type(l, list, ATRI_IR_INVALID);
+    AtriIRType type = atri_ir_pointee(pointer);
+    if (!atri_ir_is_struct(type) || !l->ir->structs[type-ATRI_IR_STRUCT].list) {
+        return error(l, l->ast->expressions[list].span, "list operation requires a pointer to list(T)");
+    }
+    AtriIRType element = l->ir->structs[type-ATRI_IR_STRUCT].element;
+    size_t stride = atri_ir_type_size(l->ir, element);
+    if (!stride) { return error(l, call->span, "list operations require a nonzero-size element"); }
+    AtriId receiver;
+    if (!expression(l, list, pointer, &receiver) ||
+        !emit(l, (AtriIRInst){.kind = ATRI_IR_CAST, .type = callee->parameter_types[0], .left = receiver, .span = call->span}, &args[0])) {
+        return false;
+    }
+    if (call->argument_count == 2) {
+        /* 追加可能移动 data。在调用标准库前独立保存元素，包括来自该列表的元素。 */
+        AtriId operand = l->ast->arguments[call->first_argument+1], value, slot, address;
+        AtriSpan span = l->ast->expressions[operand].span;
+        if (!expression(l, operand, element, &value) ||
+            !emit(l, (AtriIRInst){.kind = ATRI_IR_LOCAL, .type = element, .span = span}, &slot) ||
+            !store(l, slot, value, span) ||
+            !emit(l, (AtriIRInst){.kind = ATRI_IR_ADDRESS, .type = atri_ir_pointer_type(element), .left = slot, .span = span}, &address) ||
+            !emit(l, (AtriIRInst){.kind = ATRI_IR_CAST, .type = ATRI_IR_PTR_VOID, .left = address, .span = span}, &args[1])) {
+            return false;
+        }
+    }
+    return emit(l, (AtriIRInst){.kind = ATRI_IR_CONST, .type = ATRI_IR_U64, .immediate = stride, .span = call->span}, &args[call->argument_count]);
+}
+
+static bool call_arguments(Lower *l, const AtriExpr *call, AtriId callee, AtriId *args) {
+    const AtriIRFunction *signature = &l->ir->functions[callee];
+    size_t fixed = atri_explicit_parameters(signature);
+    for (size_t i = 0; i < call->argument_count; ++i) {
+        AtriId operand = l->ast->arguments[call->first_argument+i];
+        AtriIRType expected = i < fixed ? signature->parameter_types[i] : ATRI_IR_INVALID;
+        if (!expression(l, operand, expected, &args[i])) {
+            if (i < fixed && callee < l->ast->function_count) {
+                AtriId parameter = l->ast->functions[callee].first_parameter+i;
+                atri_diagnostic_note(l->diagnostic, l->ast->parameters[parameter].type, "parameter declared here");
+            }
+            return false;
+        }
+        if (i < fixed) { continue; }
+        AtriIRType type = l->function->instructions[args[i]].type;
+        AtriSpan span = l->ast->expressions[operand].span;
+        if (type == ATRI_IR_BOOL || (atri_ir_is_integer(type) && atri_integer_width(type) < 32)) {
+            if (!emit(l, (AtriIRInst){.kind = ATRI_IR_C_PROMOTE, .type = ATRI_IR_I32, .left = args[i], .span = span}, &args[i])) { return false; }
+        } else if (type == ATRI_IR_VOID || atri_ir_is_array(type) || !c_value_compatible(l->ir, type)) {
+            return error(l, span, "variadic argument requires a supported C ABI value; arrays require an explicit element pointer");
+        }
+    }
+    return true;
+}
+
 static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out) {
     const AtriExpr *e = &l->ast->expressions[id];
     if (++l->depth > 256) { --l->depth; return error(l, e->span, "expression nesting limit exceeded"); }
@@ -626,7 +754,13 @@ static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out) {
         }
         case ATRI_EXPR_RUN: ok = run(l, e, expected, false, out); break;
         case ATRI_EXPR_CONDITIONAL: ok = conditional(l, e, expected, out); break;
-        case ATRI_EXPR_STRING: ok = string_literal(l, e, out); break;
+        case ATRI_EXPR_STRING: {
+            bool view = expected != ATRI_IR_INVALID && expected == l->ir->string_type;
+            size_t index;
+            ok = literal_data(l, e, view, &index) && emit(l, (AtriIRInst){.kind=ATRI_IR_STRING,
+                .type=view ? expected : ATRI_IR_PTR_U8, .immediate=index, .span=e->span}, out);
+            break;
+        }
         case ATRI_EXPR_BOOL:
             inst.kind = ATRI_IR_CONST; inst.type = ATRI_IR_BOOL; inst.immediate = e->boolean;
             ok = emit(l, inst, out); break;
@@ -649,6 +783,11 @@ static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out) {
             }
             break;
         case ATRI_EXPR_NAME: {
+            if (!e->qualifier.end && named(l, e->text, "context")) {
+                ok = l->ir->context_pointer == ATRI_IR_INVALID ? error(l, e->text, "context requires std::mem") :
+                    current_context(l, e->span, l->ir->context_pointer, out);
+                break;
+            }
             if (atri_enum_member(l->source, l->ast, l->ir, e, &inst.type, &inst.immediate)) {
                 inst.kind = ATRI_IR_CONST; ok = emit(l, inst, out); break;
             }
@@ -738,40 +877,35 @@ static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out) {
             break;
         }
         case ATRI_EXPR_CALL: {
-            if (!e->qualifier.end && lookup(l, e->text) != ATRI_NONE) { error(l, e->text, "local value is not callable"); break; }
             AtriId callee = resolve_declaration(l, e, false);
+            size_t local = e->qualifier.end ? ATRI_NONE : lookup(l, e->text);
+            if (local != ATRI_NONE) {
+                Binding *b = &l->bindings[local];
+                if (b->type != l->ir->resize_pointer || b->unavailable || l->constant_context) {
+                    error(l, e->text, "local value is not callable here"); break;
+                }
+                AtriId proc = b->value;
+                if (b->address != ATRI_NONE && !emit(l, (AtriIRInst){.kind=ATRI_IR_LOAD, .type=b->type,
+                    .left=b->address, .span=e->span}, &proc)) { break; }
+                inst.procedure = proc+1;
+                callee = l->ir->resize_function;
+            }
             if (callee == ATRI_NONE) {
                 error(l, e->text, e->keyword ? "#keyword is available inside a declaration listener plugin" : "unknown function name");
                 break;
             }
             const AtriIRFunction *f = &l->ir->functions[callee];
-            if (e->argument_count < f->parameter_count || (!f->variadic && e->argument_count != f->parameter_count)) { error(l, e->span, "function argument count does not match its signature"); break; }
-            AtriId *args = e->argument_count == 0 ? NULL : malloc(e->argument_count * sizeof(*args));
-            if (e->argument_count != 0 && args == NULL) { error(l, e->span, "out of memory"); break; }
-            ok = true;
-            for (size_t a = 0; a < e->argument_count; ++a) {
-                AtriId operand = l->ast->arguments[e->first_argument+a];
-                AtriIRType expected_argument = a < f->parameter_count ? f->parameter_types[a] : ATRI_IR_INVALID;
-                if (!expression(l, operand, expected_argument, &args[a])) {
-                    if (a < f->parameter_count && callee < l->ast->function_count) {
-                        AtriId parameter = l->ast->functions[callee].first_parameter + a;
-                        atri_diagnostic_note(l->diagnostic, l->ast->parameters[parameter].type, "parameter declared here");
-                    }
-                    ok = false;
-                    break;
-                }
-                if (a < f->parameter_count) { continue; }
-                AtriIRType argument = l->function->instructions[args[a]].type;
-                AtriSpan span = l->ast->expressions[operand].span;
-                if (argument == ATRI_IR_BOOL || (atri_ir_is_integer(argument) && atri_integer_width(argument) < 32)) {
-                    if (!emit(l, (AtriIRInst){.kind = ATRI_IR_C_PROMOTE, .type = ATRI_IR_I32, .left = args[a], .span = span}, &args[a])) { ok = false; break; }
-                } else if (argument == ATRI_IR_VOID || atri_ir_is_array(argument) || !c_value_compatible(l->ir, argument)) {
-                    ok = error(l, span, "variadic argument requires a supported C ABI value; arrays require an explicit element pointer"); break;
-                }
-            }
+            bool list_op = callee == l->ir->append_function || callee == l->ir->release_function;
+            size_t fixed = atri_explicit_parameters(f) - (size_t)list_op;
+            if (e->argument_count < fixed || (!f->variadic && e->argument_count != fixed)) { error(l, e->span, "function argument count does not match its signature"); break; }
+            size_t count = e->argument_count + (size_t)f->has_context + (size_t)list_op;
+            AtriId *args = count ? malloc(count * sizeof(*args)) : NULL;
+            if (count && !args) { error(l, e->span, "out of memory"); break; }
+            ok = list_op ? list_arguments(l, e, f, args) : call_arguments(l, e, callee, args);
             inst.kind = ATRI_IR_CALL; inst.callee = callee; inst.type = f->return_type;
-            inst.first_argument = l->function->argument_count; inst.argument_count = e->argument_count;
-            for (size_t a = 0; ok && a < e->argument_count; ++a)
+            if (ok && f->has_context) { ok = current_context(l, e->span, ATRI_IR_PTR_VOID, &args[count-1]); }
+            inst.first_argument = l->function->argument_count; inst.argument_count = count;
+            for (size_t a = 0; ok && a < count; ++a)
                 if (!atri_append((void **)&l->function->arguments, &l->function->argument_count,
                                   &l->function->argument_capacity, sizeof(args[a]), &args[a])) ok = error(l, e->span, "out of memory");
             free(args);
@@ -783,7 +917,7 @@ static bool expression(Lower *l, AtriId id, AtriIRType expected, AtriId *out) {
         char want[ATRI_IR_TYPE_NAME_SIZE], got[ATRI_IR_TYPE_NAME_SIZE];
         ok = error(l, e->span, "type mismatch");
         snprintf(l->diagnostic->detail, sizeof(l->diagnostic->detail), "expected %s, got %s",
-                 atri_ir_type_name(expected, want), atri_ir_type_name(l->function->instructions[*out].type, got));
+                 atri_ir_type_name(l->ir, expected, want), atri_ir_type_name(l->ir, l->function->instructions[*out].type, got));
     }
     --l->depth; return ok;
 }
@@ -968,7 +1102,7 @@ static bool simple(Lower *l, const AtriStatement *s) {
     bool declaration = s->kind == ATRI_STMT_VARIABLE || s->kind == ATRI_STMT_CONSTANT;
     if (declaration) {
         if (!type(l, s->type, &expected)) return false;
-        if (s->kind == ATRI_STMT_CONSTANT && (atri_ir_is_pointer(expected) || atri_ir_is_aggregate(expected))) {
+        if (s->kind == ATRI_STMT_CONSTANT && expected != l->ir->string_type && (atri_ir_is_pointer(expected) || atri_ir_is_aggregate(expected))) {
             return error(l, s->span, "compile-time pointer constants, struct constants, union constants and array constants are not supported yet");
         }
     } else if (s->kind == ATRI_STMT_RETURN) expected = l->function->return_type;
@@ -1219,6 +1353,10 @@ static bool check_shifts(Lower *l) {
     }
     return true;
 }
+static int relocation_order(const void *left, const void *right) {
+    const AtriStringRelocation *a = left, *b = right;
+    return (a->offset > b->offset) - (a->offset < b->offset);
+}
 static bool c_value_compatible(const AtriIRProgram *p, AtriIRType type) {
     if (atri_ir_is_array(type)) {
         AtriIRArray array = p->arrays[type-ATRI_IR_ARRAY];
@@ -1256,16 +1394,16 @@ bool atri_lower(AtriSource source, AtriProgram *ast, AtriIRProgram *out, AtriDia
         ir.globals[i].name = g->name;
         if (!type(&l, g->type, &ir.globals[i].type)) { goto failure; }
         bool aggregate = atri_ir_is_aggregate(ir.globals[i].type);
-        if (ir.globals[i].constant && (atri_ir_is_pointer(ir.globals[i].type) || aggregate)) {
+        if (ir.globals[i].constant && ir.globals[i].type != ir.string_type && (atri_ir_is_pointer(ir.globals[i].type) || aggregate)) {
             error(&l, g->span, "compile-time pointer constants, struct constants, union constants and array constants are not supported yet"); goto failure;
         }
-        if (aggregate) {
+        if (aggregate && !ir.globals[i].constant) {
             ir.globals[i].data_size = atri_ir_type_size(&ir, ir.globals[i].type);
             ir.globals[i].data = calloc(ir.globals[i].data_size ? ir.globals[i].data_size : 1, 1);
             if (!ir.globals[i].data) { error(&l, g->span, "out of memory for static aggregate storage"); goto failure; }
         }
         ir.functions[ast->function_count+i] = (AtriIRFunction){.name = g->name,
-            .return_type = aggregate ? ATRI_IR_I32 : ir.globals[i].type, .block_count = 1};
+            .return_type = aggregate && !ir.globals[i].constant ? ATRI_IR_I32 : ir.globals[i].type, .block_count = 1};
     }
     for (size_t i = 0; i < ast->field_count; ++i) {
         AtriIRType ft = ir.fields[i].type;
@@ -1276,17 +1414,28 @@ bool atri_lower(AtriSource source, AtriProgram *ast, AtriIRProgram *out, AtriDia
             .return_type = ast->fields[i].expression == ATRI_NONE ? ATRI_IR_I32 : ft, .block_count = 1};
     }
     /* 先收齐所有签名再降低函数体，使后定义函数和相互递归在同一套调用检查下成立。 */
+    AtriId mem_module = atri_standard_module(source, ast, "std::mem");
+    AtriId list_module = atri_standard_module(source, ast, "std::list");
+    ir.resize_function = ir.append_function = ir.release_function = ATRI_NONE;
     for (size_t i = 0; i < ast->function_count; ++i) {
         const AtriFunction *f = &ast->functions[i];
         AtriIRFunction *signature = &ir.functions[i];
         signature->module = atri_module_at(ast, f->name.start); signature->name = f->name; signature->parameter_count = f->parameter_count;
         signature->external_c = f->external_c; signature->variadic = f->variadic; signature->block_count = f->external_c ? 0 : 1;
+        bool entry = !signature->module && (named(&l, f->name, "main") ||
+            (ast->plugin && (named(&l, f->name, "register") || named(&l, f->name, "message"))));
+        signature->has_context = !f->external_c && !entry;
+        signature->parameter_count += (size_t)signature->has_context;
+        if (signature->module == mem_module && named(&l, f->name, "c_resize")) { ir.resize_function = i; }
+        if (signature->module == list_module && named(&l, f->name, "append")) { ir.append_function = i; }
+        if (signature->module == list_module && named(&l, f->name, "release")) { ir.release_function = i; }
         if (f->return_type.end-f->return_type.start == 4 && !memcmp(source.text+f->return_type.start, "void", 4)) {
             signature->return_type = ATRI_IR_VOID;
         } else if (!type(&l, f->return_type, &signature->return_type)) { goto failure; }
         if (f->external_c && (atri_ir_is_array(signature->return_type) || !c_value_compatible(&ir, signature->return_type))) { error(&l, f->return_type, "arrays and zero-size structs have no C by-value ABI"); goto failure; }
-        signature->parameter_types = calloc(f->parameter_count ? f->parameter_count : 1, sizeof(*signature->parameter_types));
+        signature->parameter_types = calloc(f->parameter_count + 1, sizeof(*signature->parameter_types));
         if (!signature->parameter_types) { error(&l, f->name, "out of memory"); goto failure; }
+        if (signature->has_context) { signature->parameter_types[f->parameter_count] = ATRI_IR_PTR_VOID; }
         for (size_t a = 0; a < f->parameter_count; ++a) {
             AtriParameter parameter = ast->parameters[f->first_parameter+a];
             for (size_t previous = 0; previous < a; ++previous) {
@@ -1343,10 +1492,12 @@ bool atri_lower(AtriSource source, AtriProgram *ast, AtriIRProgram *out, AtriDia
         l.ast_function = &context; l.function = &ir.functions[ast->function_count+i];
         l.binding_count = 0; l.visible_binding = ATRI_NONE; l.constant_context = true;
         AtriId value, result, ignored;
-        if (i < ast->global_count && atri_ir_is_aggregate(ir.globals[i].type)) {
+        if (i < ast->global_count && !ir.globals[i].constant && atri_ir_is_aggregate(ir.globals[i].type)) {
             if (!static_initializer(&l, i, ir.globals[i].type, g->expression, ATRI_NONE, 0, 0, g->span) ||
                 !emit(&l, (AtriIRInst){.kind = ATRI_IR_CONST, .type = ATRI_IR_I32, .span = g->span}, &value) ||
                 !emit(&l, (AtriIRInst){.kind = ATRI_IR_RETURN, .type = ATRI_IR_I32, .left = value, .span = g->span}, &ignored)) { goto failure; }
+            AtriIRGlobal *global = &ir.globals[i];
+            if (global->string_count > 1) { qsort(global->strings, global->string_count, sizeof(*global->strings), relocation_order); }
             continue;
         }
         if (i >= ast->global_count && g->expression == ATRI_NONE) {
@@ -1386,11 +1537,14 @@ bool atri_lower(AtriSource source, AtriProgram *ast, AtriIRProgram *out, AtriDia
     free(l.case_values);
     for (size_t i = 0; i < ast->global_count+ast->field_count; ++i) {
         AtriIRFunction *initializer = &ir.functions[ast->function_count+i];
-        uint64_t bits = initializer->instructions[initializer->instruction_count-2].immediate;
+        const AtriIRInst *value = &initializer->instructions[initializer->instruction_count-2];
         if (i < ast->global_count) {
-            if (!atri_ir_is_aggregate(ir.globals[i].type)) { ir.globals[i].bits = bits; }
+            AtriIRGlobal *g = &ir.globals[i];
+            if (g->constant && g->type == ir.string_type) {
+                g->bits = value->kind == ATRI_IR_STRING ? value->immediate+1 : 0;
+            } else if (!atri_ir_is_aggregate(g->type)) { g->bits = value->immediate; }
         }
-        else { ir.fields[i-ast->global_count].default_bits = bits; }
+        else { ir.fields[i-ast->global_count].default_bits = value->immediate; }
     }
     for (size_t i = 0; i < l.static_count; ++i) {
         const StaticValue *value = &l.static_values[i];
@@ -1406,7 +1560,14 @@ bool atri_lower(AtriSource source, AtriProgram *ast, AtriIRProgram *out, AtriDia
             AtriIRInst *inst = &f->instructions[j];
             if (inst->kind == ATRI_IR_CALL && inst->callee >= ast->function_count) {
                 size_t index = inst->callee-ast->function_count;
-                inst->kind = ATRI_IR_CONST; inst->immediate = index < ast->global_count ? ir.globals[index].bits : ir.fields[index-ast->global_count].default_bits;
+                if (inst->type == ir.string_type) {
+                    uint64_t literal = ir.globals[index].bits;
+                    inst->kind = literal ? ATRI_IR_STRING : ATRI_IR_ZERO;
+                    inst->immediate = literal ? literal-1 : 0;
+                } else {
+                    inst->kind = ATRI_IR_CONST;
+                    inst->immediate = index < ast->global_count ? ir.globals[index].bits : ir.fields[index-ast->global_count].default_bits;
+                }
             }
         }
     }

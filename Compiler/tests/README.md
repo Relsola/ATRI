@@ -10,6 +10,8 @@ ctest --test-dir build -R optimization -V
 
 CTest 会为读取用例文件的测试设置工作目录。原生测试需要 Windows x64、Clang 和链接工具。
 
+`compiler-pipeline` 在 O0、O1、O2 编译并实际执行标准库用例，两份用例也在 `#run` 中运行核心断言。列表用例覆盖词法覆盖、分配器回调、已有列表跨作用域扩容/释放及分配失败。字符串用例覆盖恰好三个字节的缓冲区、内嵌零、切片、拼接时输入引用旧输出、显式 C 转换和编译期结果物化。[上下文与列表](cases/context_list.ar) · [原生字符串](cases/native_string.ar) · [流水线测试](pipeline_tests.cmake)
+
 ## 先读这些文件
 
 | 要看什么 | 入口 |

@@ -1,0 +1,34 @@
+mem :: import "std::mem";
+#extern(C) fn memcpy(dest: *void, src: *void, size: u64) -> *void;
+
+struct Storage { data: *void; len: u64; cap: u64; owner: mem::Allocator; }
+
+export fn append(items: *Storage, element: *void, stride: u64) -> bool {
+    if ((*items).len == (*items).cap) {
+        capacity: u64 = 4;
+        if ((*items).cap != 0) {
+            if ((*items).cap > 0x3fff_ffff_ffff_ffff) { return false; }
+            capacity = (*items).cap * 2;
+        }
+        if (capacity > 0x7fff_ffff_ffff_ffff / stride) { return false; }
+        owner: mem::Allocator = (*items).owner;
+        if ((*items).cap == 0) { owner = (*context).allocator; }
+        grown: *void = mem::resize_with(owner, (*items).data, (*items).cap * stride, capacity * stride);
+        if (grown == null) { return false; }
+        (*items).data = grown;
+        (*items).cap = capacity;
+        (*items).owner = owner;
+    }
+    dest: *u8 = cast(*u8, (*items).data) + cast(i64, (*items).len * stride);
+    memcpy(cast(*void, dest), element, stride);
+    (*items).len += 1;
+    return true;
+}
+
+export fn release(items: *Storage, stride: u64) -> void {
+    if ((*items).cap != 0) {
+        mem::resize_with((*items).owner, (*items).data, (*items).cap * stride, 0);
+        empty: Storage;
+        *items = empty;
+    }
+}

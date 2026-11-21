@@ -18,7 +18,7 @@ typedef enum {
     ATRI_IR_LOCAL, ATRI_IR_LOAD, ATRI_IR_STORE,
     ATRI_IR_PTR_OFFSET, ATRI_IR_PTR_DIFF, ATRI_IR_ADDRESS, ATRI_IR_COMPARE,
     ATRI_IR_LABEL, ATRI_IR_JUMP, ATRI_IR_BRANCH, ATRI_IR_UNREACHABLE, ATRI_IR_STRING, ATRI_IR_ZERO, ATRI_IR_FIELD,
-    ATRI_IR_INDEX, ATRI_IR_CAST, ATRI_IR_C_PROMOTE, ATRI_IR_LAZY_SELECT,
+    ATRI_IR_INDEX, ATRI_IR_CAST, ATRI_IR_C_PROMOTE, ATRI_IR_CONTEXT, ATRI_IR_FUNCTION, ATRI_IR_LAZY_SELECT,
     ATRI_IR_LAZY_LOGICAL /* 常量初始化中的私有短路指令，公开可执行 IR 中不允许保留。 */
 } AtriIRKind;
 typedef struct {
@@ -28,6 +28,7 @@ typedef struct {
     AtriOp op;
     uint64_t immediate; /* LOCAL: 0 为栈对象，非零为 globals 索引 + 1；FIELD 为 fields 索引。 */
     AtriId left, right, callee; /* 私有 LAZY_SELECT 的 callee 保存 false 分支值 ID。 */
+    AtriId procedure; /* 间接调用的函数指针值 ID 加一，callee 提供已检查的签名。 */
     size_t first_argument, argument_count;
     AtriId target, alternative; /* 跳转的块 ID，与 left/right 使用的指令 ID 不同。 */
 } AtriIRInst;
@@ -56,24 +57,32 @@ typedef struct {
     size_t constant_count, constant_capacity;
     size_t block_count; /* 入口块 0 隐含存在，其余块由 LABEL.immediate 标识，物理顺序可以不同。 */
     AtriId module;
-    bool variadic;
+    bool variadic, has_context;
     bool external_c; /* 只有完整签名，不拥有函数体；链接符号使用源码名称。 */
 } AtriIRFunction;
+static inline size_t atri_explicit_parameters(const AtriIRFunction *f) {
+    return f->parameter_count - (size_t)f->has_context;
+}
+bool atri_ir_allocator_callback(const AtriIRFunction *f);
 typedef struct {
     unsigned char *bytes;
-    size_t length; /* 不含额外的终止零字节；数据由 IRProgram 拥有，可包含内嵌零。 */
+    size_t length; /* 正文字节数。只有 C 字面量在 bytes[length] 保存终止零。 */
+    bool view;
 } AtriIRString;
+typedef struct { size_t offset, literal; } AtriStringRelocation;
 typedef struct {
     AtriSpan name;
     AtriIRType type;
-    uint64_t bits;
+    uint64_t bits; /* 标量位模式。原生 string 常量使用字面量索引 + 1，零表示空描述符。 */
     bool constant;
     unsigned char *data; /* 聚合初始对象表示，由 Global 拥有；标量仍使用 bits。 */
     size_t data_size;
+    AtriStringRelocation *strings;
+    size_t string_count, string_capacity;
 } AtriIRGlobal;
 
-typedef struct { AtriSpan name; AtriIRType type; size_t offset; uint64_t default_bits; } AtriIRField;
-typedef struct { AtriSpan name; size_t first_field, field_count, size, alignment; unsigned state; bool opaque, is_union; } AtriIRStruct;
+typedef struct { AtriSpan name; AtriIRType type; size_t offset; uint64_t default_bits; const char *builtin_name; } AtriIRField;
+typedef struct { AtriSpan name; size_t first_field, field_count, size, alignment; unsigned state; bool opaque, is_union, list; AtriIRType element; } AtriIRStruct;
 typedef struct { AtriIRType element; size_t length; } AtriIRArray;
 typedef struct { AtriSpan name; uint64_t bits; bool ready; } AtriIREnumVariant;
 typedef struct {
@@ -86,6 +95,8 @@ typedef struct {
 typedef struct {
     AtriSource source;
     const AtriProgram *lowering_ast;
+    AtriIRType context_pointer, resize_pointer, string_type;
+    AtriId list_storage, append_function, release_function, resize_function;
     AtriIREnum *enums;
     size_t enum_count;
     AtriIREnumVariant *variants;
@@ -145,7 +156,7 @@ bool atri_ir_is_pointer(AtriIRType type);
 bool atri_ir_has_value(AtriIRKind kind);
 bool atri_compare(AtriIRType type, AtriOp op, uint64_t a, uint64_t b);
 enum { ATRI_IR_TYPE_NAME_SIZE = ATRI_IR_MAX_POINTER_DEPTH + 8 };
-const char *atri_ir_type_name(AtriIRType type, char name[ATRI_IR_TYPE_NAME_SIZE]);
+const char *atri_ir_type_name(const AtriIRProgram *p, AtriIRType type, char name[ATRI_IR_TYPE_NAME_SIZE]);
 uint64_t atri_integer_convert(AtriIRType source, AtriIRType target, uint64_t bits);
 bool atri_integer_compute(AtriIRType type, AtriOp op, uint64_t a, uint64_t b, uint64_t *result);
 /* 除零及有符号最小值 / 或 % -1 返回 false；其余结果按目标位模式保存。 */

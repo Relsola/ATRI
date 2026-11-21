@@ -1,0 +1,40 @@
+text :: import "std::string";
+import "std::list";
+#extern(C) fn atri_register_annotation(name: *u8) -> i32;
+#extern(C) fn atri_register_infix(name: *u8, symbol: *u8, precedence: u32, right: u32) -> i32;
+#extern(C) fn atri_ast_has_annotation_bytes(decl: u64, name: *u8, size: u64) -> i32;
+#extern(C) fn atri_ast_expression_count(decl: u64) -> u64;
+#extern(C) fn atri_ast_expression(decl: u64, index: u64) -> u64;
+#extern(C) fn atri_ast_operator(node: u64) -> *u8;
+#extern(C) fn atri_ast_operand(node: u64, side: u32) -> u64;
+#extern(C) fn atri_ast_source(node: u64) -> *u8;
+#extern(C) fn atri_ast_replace(node: u64, source: *u8) -> i32;
+
+export fn register_annotation(name: string) -> i32 {
+    bytes: list(u8);
+    defer release(&bytes);
+    if (!text::to_c(name, &bytes)) { return 0; }
+    return atri_register_annotation(bytes.data);
+}
+export fn register_infix(name: string, symbol: string, precedence: u32, right: u32) -> i32 {
+    annotation: list(u8);
+    operator: list(u8);
+    defer release(&annotation);
+    defer release(&operator);
+    if (!text::to_c(name, &annotation) || !text::to_c(symbol, &operator)) { return 0; }
+    return atri_register_infix(annotation.data, operator.data, precedence, right);
+}
+export fn ast_has_annotation(decl: u64, name: string) -> i32 {
+    return atri_ast_has_annotation_bytes(decl, name.data, name.len);
+}
+export fn ast_expression_count(decl: u64) -> u64 { return atri_ast_expression_count(decl); }
+export fn ast_expression(decl: u64, index: u64) -> u64 { return atri_ast_expression(decl, index); }
+export fn ast_operator(node: u64) -> string { return text::from_c(atri_ast_operator(node)); }
+export fn ast_operand(node: u64, side: u32) -> u64 { return atri_ast_operand(node, side); }
+export fn ast_to_code(node: u64) -> string { return text::from_c(atri_ast_source(node)); }
+export fn code_to_ast(node: u64, source: string) -> i32 {
+    bytes: list(u8);
+    defer release(&bytes);
+    if (!text::to_c(source, &bytes)) { return 0; }
+    return atri_ast_replace(node, bytes.data);
+}
